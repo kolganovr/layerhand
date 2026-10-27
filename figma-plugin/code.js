@@ -1023,6 +1023,8 @@ function summarizeTables(refs) {
   return blocks.join("\n");
 }
 
+const TEXTS_HINT = 'not a TEXT node: use props:["texts"]';
+
 // Property definitions of a COMPONENT_SET / COMPONENT as { name: { type, default, options? } }
 // (the "#id" suffix of the name is dropped). A variant inside a set throws on its own
 // componentPropertyDefinitions, so it reads the parent set's. null when there are none.
@@ -1043,6 +1045,12 @@ function readPropDefs(n) {
   return Object.keys(out).length ? out : null;
 }
 
+// Every TEXT descendant (depth-first) as "id characters" lines, no truncation.
+function readTexts(n) {
+  const nodes = n.type === "TEXT" ? [n] : (typeof n.findAll === "function" ? n.findAll(x => x.type === "TEXT") : []);
+  return nodes.map(t => t.id + " " + String(t.characters).replace(/\n/g, "\\n"));
+}
+
 // Named read-outs for inspect() and check(). Anything else is read straight
 // off the node (width, itemSpacing, layoutSizingHorizontal, ...).
 const READ_PROPS = {
@@ -1050,7 +1058,7 @@ const READ_PROPS = {
   fills: n => ("fills" in n ? readPaints(n.fills) : null),
   stroke: n => ("strokes" in n ? readPaints(n.strokes) : null),
   strokes: n => ("strokes" in n ? readPaints(n.strokes) : null),
-  text: n => (n.type === "TEXT" ? n.characters : null),
+  text: n => (n.type === "TEXT" ? n.characters : TEXTS_HINT),
   characters: n => (n.type === "TEXT" ? n.characters : null),
   font: n => readFont(n),
   fontFamily: n => (n.type === "TEXT" && n.fontName !== figma.mixed ? n.fontName.family : null),
@@ -1078,6 +1086,7 @@ const READ_PROPS = {
     Object.keys(n.componentProperties).forEach(k => { out[k.replace(/#\d+:\d+$/, "")] = n.componentProperties[k].value; });
     return out;
   },
+  texts: n => readTexts(n),
   absolute: n => (n.absoluteBoundingBox ? ["x", "y", "width", "height"].map(k => readRound(n.absoluteBoundingBox[k])) : null),
   reactions: n => readReactions(n),
   connector: n => (n.type === "CONNECTOR"

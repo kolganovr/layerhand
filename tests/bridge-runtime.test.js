@@ -1462,6 +1462,33 @@ inspectDone = inspectDone.then(async () => {
   check("T-072: standalone master -> its own definitions", JSON.stringify(r[master.id].props) === JSON.stringify({ Text: { type: "TEXT", default: "New" } }) && r[master.id].variant === null, r[master.id]);
   check("T-072: instance keeps values", JSON.stringify(r[inst.id].props) === JSON.stringify({ Label: "Buy" }) && r[inst.id].variant.Size === "M", r[inst.id]);
 
+  // T-073
+  const mk = (n) => {
+    const f = makeNode("FRAME", "Card " + n);
+    f.appendChild(makeNode("TEXT", "t", { characters: "Заголовок карточки номер " + n + " — достаточно длинный текст, больше сорока символов" }));
+    f.appendChild(makeNode("FRAME", "inner")); f.children[1].appendChild(makeNode("TEXT", "u", { characters: "line1\nline2 " + n }));
+    figma.currentPage.appendChild(f);
+    return f;
+  };
+  const cards = Array.from({ length: 16 }, (_, i) => mk(i));
+  const tx = await inspect({ node_ids: cards.map(c => c.id), props: ["texts"] });
+  const txLines = tx.texts.split("\n");
+  check("T-073: texts -> top-level string, ids + full characters, no props leftover", !tx.props && txLines.filter(l => l[0] === "@").length === 16 && txLines.some(l => l.endsWith("номер 15 — достаточно длинный текст, больше сорока символов")) && txLines.some(l => l.endsWith("line1\\nline2 3")), txLines.slice(0, 4));
+  const shrunk = srvMod.shrinkToBudget(tx, 3500);
+  check("T-073: 16 frames fit the 3500 budget untouched", shrunk.truncated === null && shrunk.value.texts === tx.texts, shrunk.truncated);
+  const big = makeNode("FRAME", "Big");
+  for (let i = 0; i < 80; i++) big.appendChild(makeNode("TEXT", "t" + i, { characters: "Строка текста номер " + i + " ".padEnd(40, ".") }));
+  figma.currentPage.appendChild(big);
+  const bt = await inspect({ node_ids: [big.id], props: ["texts"] });
+  const bs = srvMod.shrinkToBudget(bt, 3500);
+  const bl = bs.value.texts.split("\n");
+  const m = /pass offset=(\d+)$/.exec(bl[bl.length - 1]);
+  check("T-073: overflow -> whole lines and a pass offset=K line", !!bs.truncated && !!m && bl.length > 20, bl.slice(-2));
+  const page2 = srvMod.shrinkToBudget(srvMod.applyLineOffset(bt, Number(m[1])), 3500).value.texts.split("\n");
+  check("T-073: offset=K continues from the line it promised", page2[0] === "… lines 0–" + (Number(m[1]) - 1) + " skipped" && page2[1].indexOf("Строка текста номер " + (Number(m[1]) - 0)) !== -1, page2.slice(0, 3));
+  const hint = (await inspect({ node_ids: [cards[0].id, cards[0].children[0].id], props: ["text"] })).props;
+  check("T-073: text on a FRAME -> hint to use texts, on TEXT -> characters", /texts/.test(hint[cards[0].id].text) && /^Заголовок/.test(hint[cards[0].children[0].id].text), hint);
+
 });
 
 inspectDone.then(() => {

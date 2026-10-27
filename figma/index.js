@@ -1214,7 +1214,7 @@ const TOOLS = [
         props: {
           type: "array",
           items: { type: "string" },
-          description: "Return these properties per node instead of an outline, e.g. [\"width\", \"layoutSizingHorizontal\", \"fill\", \"text\"]; also \"reactions\" (prototype interactions) and \"connector\" (FigJam connector ends)."
+          description: "Return these properties per node instead of an outline, e.g. [\"width\", \"layoutSizingHorizontal\", \"fill\", \"text\"]; also \"reactions\" (prototype interactions), \"connector\" (FigJam connector ends) and \"texts\" (all texts below a frame, id + full characters, pages with offset)."
         },
         view: {
           type: "string",
@@ -2598,7 +2598,7 @@ function applyLineOffset(result, offset) {
   const off = Math.floor(Number(offset));
   if (!result || typeof result !== "object" || !Number.isFinite(off) || off <= 0) return result;
   const out = { ...result };
-  for (const key of ["outline", "found", "compare", "like", "flow"]) {
+  for (const key of ["outline", "found", "compare", "like", "flow", "texts"]) {
     if (typeof out[key] !== "string" || out[key].indexOf("\n") === -1) continue;
     out[key] = `… lines 0–${off - 1} skipped\n` + out[key].split("\n").slice(off).join("\n");
   }
@@ -2729,7 +2729,24 @@ function buildInspectCode(args = {}) {
     "if (wantsRead && !out.flow && (targets.length || !query)) {",
     "  const refs = targets.length ? targets : [figma.currentPage];",
     "  if (a.compare) {}",
-    "  else if (a.props) out.props = bridge.inspect(refs, a.props);",
+    "  else if (a.props) {",
+    "    out.props = bridge.inspect(refs, a.props);",
+    // props:["texts"]: lines "id characters" move to the top-level string out.texts, which pages with offset.
+    "    if (a.props.indexOf('texts') !== -1) {",
+    "      const lines = [];",
+    "      const multi = Object.keys(out.props).length > 1;",
+    "      for (const id of Object.keys(out.props)) {",
+    "        const row = out.props[id];",
+    "        if (!row || typeof row !== 'object' || !Array.isArray(row.texts)) continue;",
+    "        if (multi) lines.push('@' + id);",
+    "        for (const l of row.texts) lines.push(l);",
+    "        delete row.texts;",
+    "        if (!Object.keys(row).length) delete out.props[id];",
+    "      }",
+    "      out.texts = lines.length ? lines.join('\\n') : 'no TEXT nodes';",
+    "      if (!Object.keys(out.props).length) delete out.props;",
+    "    }",
+    "  }",
     "  else if (a.findText && !a.view) out.found = hits.map(f => '#' + f.id + ' ' + JSON.stringify(f.name) + ' «' + f.text + '» in ' + (f.parent ? f.parent + ', screen ' + JSON.stringify(String(f.frame).replace(/ #\\S+$/, '')) : f.frame)).join('\\n');",
     "  else {",
     "    const so = { maxChildren: 200 };",
