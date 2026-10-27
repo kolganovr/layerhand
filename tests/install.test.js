@@ -322,6 +322,26 @@ async function main() {
     check("figma-plugin/ui.html keeps the empty BRIDGE_TOKEN placeholder", ui.includes('const BRIDGE_TOKEN = "";'));
   }
 
+  console.log("\n== running server older than the update (T-079) ==");
+  {
+    // A master started before --update keeps the old code in memory and holds :8765.
+    const run = (status, pid) => installer.checkRunningServer({
+      expectedVersion: "4.4.0",
+      fetchStatus: async () => { if (status instanceof Error) throw status; return status; },
+      findPid: () => pid,
+    });
+    const none = await run(new Error("ECONNREFUSED"), null);
+    check("no server on the port -> none", none.status === "none", none);
+    const same = await run({ serverVersion: "4.4.0", pid: 11 }, null);
+    check("same version -> ok", same.status === "ok" && same.version === "4.4.0", same);
+    const staleOwn = await run({ serverVersion: "4.3.0", pid: 42 }, 99);
+    check("older master -> stale with the pid it reports", staleOwn.status === "stale" && staleOwn.version === "4.3.0" && staleOwn.pid === 42, staleOwn);
+    const staleOld = await run({ serverVersion: "4.3.0" }, 77);
+    check("master without pid in /status -> pid from the port owner", staleOld.status === "stale" && staleOld.pid === 77, staleOld);
+    const forbidden = await run({ httpStatus: 403 }, null);
+    check("wrong token -> unknown, no false alarm", forbidden.status === "unknown", forbidden);
+  }
+
   console.log(`\n${failures === 0 ? "All install.mjs checks passed." : failures + " check(s) FAILED."}`);
   process.exit(failures === 0 ? 0 : 1);
 }

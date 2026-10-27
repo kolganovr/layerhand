@@ -693,6 +693,7 @@ const bridgeServer = http.createServer((req, res) => {
       wsClients: wsClients.size,
       lastPing: lastPluginPing,
       serverVersion: SERVER_VERSION,
+      pid: process.pid,
       targets: listTargets(),
       // The plugin's "long task" / "looks stuck" states use the same thresholds as the server.
       limits: { escalateMs: TIMEOUTS.escalate, stalledAfterMs: ECONOMY.stalledAfterMs }

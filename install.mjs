@@ -664,6 +664,62 @@ function runDoctor(home, appdata) {
   console.log("==================================================");
 }
 
+/** Only one server process owns :8765 (the "master"); the others proxy to it.
+ * A master started before this --update keeps running the old code from
+ * memory, so the plugin keeps saying "Update needed" although the files on
+ * disk are new. Ask the running master for its version and say which
+ * process to restart. fetchStatus/findPid are injectable for tests. */
+async function checkRunningServer({ port = 8765, token = "", expectedVersion = "", fetchStatus, findPid } = {}) {
+  fetchStatus = fetchStatus || (async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/status`, {
+      headers: token ? { "X-Bridge-Token": token } : {},
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return { httpStatus: res.status };
+    return res.json();
+  });
+  findPid = findPid || (() => findListeningPid(port));
+  let status;
+  try {
+    status = await fetchStatus();
+  } catch {
+    return { status: "none" };
+  }
+  if (!status || !status.serverVersion) return { status: "unknown", httpStatus: status && status.httpStatus };
+  const version = status.serverVersion;
+  if (!expectedVersion || version === expectedVersion) return { status: "ok", version };
+  let pid = status.pid || null;
+  if (!pid) {
+    try { pid = findPid() || null; } catch { pid = null; }
+  }
+  return { status: "stale", version, pid };
+}
+
+/** PID listening on the port, best effort (masters before 4.4.0 don't report it in /status). */
+function findListeningPid(port) {
+  if (process.platform === "win32") {
+    const out = execFileSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+    for (const line of out.split(/\r?\n/)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length >= 5 && cols[1].endsWith(":" + port) && cols[3] === "LISTENING") return Number(cols[4]) || null;
+    }
+    return null;
+  }
+  const out = execFileSync("lsof", ["-tiTCP:" + port, "-sTCP:LISTEN"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+  return Number(out.trim().split(/\s+/)[0]) || null;
+}
+
+function reportRunningServer(result, expectedVersion) {
+  if (result.status === "stale") {
+    console.log(`[!] A Mokido server v${result.version} is still running${result.pid ? ` (PID ${result.pid})` : ""} and holds port 8765;`);
+    console.log(`    it was started before this update, so the plugin will report it instead of v${expectedVersion}.`);
+    console.log("    Restart the MCP server in the agent session that started it (Claude Code: /mcp > figma > Reconnect),");
+    console.log(`    or close that session${result.pid ? `, or stop the process: ${process.platform === "win32" ? `taskkill /PID ${result.pid}` : `kill ${result.pid}`}` : ""}.`);
+  } else if (result.status === "ok") {
+    console.log(`[✓] Running server on port 8765 is v${result.version}`);
+  }
+}
+
 function parseArgs(argv) {
   const args = { token: "", update: false, doctor: false };
   for (let i = 0; i < argv.length; i++) {
@@ -681,7 +737,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.doctor) {
@@ -695,6 +751,10 @@ function main() {
 
   checkNodeVersion();
   installOrUpdate({ token: args.token, isUpdate: args.update });
+  const tokenFile = path.join(os.homedir(), ".mokido", "bridge_token.txt");
+  const token = fs.existsSync(tokenFile) ? fs.readFileSync(tokenFile, "utf-8").trim() : "";
+  const expectedVersion = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf-8")).version;
+  reportRunningServer(await checkRunningServer({ token, expectedVersion }), expectedVersion);
 }
 
 const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -721,4 +781,6 @@ export {
   figmaSettingsPath,
   findBridgePluginRegistrations,
   checkFigmaPluginRegistration,
+  checkRunningServer,
+  findListeningPid,
 };

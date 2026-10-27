@@ -35,6 +35,7 @@
 - **`figma_inspect` props/variant on sets and masters.** `props` on a COMPONENT_SET or COMPONENT returns the property definitions (`{type, default, options}`, `#id` dropped) instead of null; a variant inside a set reads its parent set's. `variant` on a set lists each variant property with its values. Instances are unchanged.
 - **`figma_inspect` props:["texts"].** All TEXT descendants of a frame as `id characters` lines, full text (no 40-char cut), paged with `offset=K` like the outline. `props:["text"]` on a non-TEXT node now answers with a hint to use "texts" instead of null.
 - **`figma_inspect` find with no match names the page.** Without node_ids, "no matches" now says which page was searched and lists the match count on the other pages (loads at most 8 of them), since a find only covers the current page.
+- **`install.mjs` names a server left running from before the update.** Only one server process owns port 8765; one started before `--update` keeps the old code in memory, so the plugin kept asking to update. The installer now asks the running server for its version and, if it differs, prints the version, the PID and how to restart it (`/mcp` reconnect, close that session, or stop the process). `/status` reports `pid`.
 
 ## 4.3.0 -- renamed to Mokido
 
