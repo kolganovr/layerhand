@@ -19,12 +19,12 @@ node install.mjs --update
 ```
 
 > [!IMPORTANT]
-> **CRITICAL RULE:** Do NOT merely download or extract the repository files. You **MUST** run `node install.mjs` / `node install.mjs --update`. This command copies the server and plugin files into the system directories (`~/.gemini/antigravity/mcp/` and `~/.gemini/antigravity-ide/mcp/`) and registers the server in all active `mcp_config.json` configuration files.
+> **CRITICAL RULE:** Do NOT merely download or extract the repository files. You **MUST** run `node install.mjs` / `node install.mjs --update`. This command copies the server and plugin files into one shared directory, `~/.mokido/mcp/`, and points every detected MCP client config at it (Antigravity, Claude Code, Claude Desktop, Cursor, Windsurf). Copies left by older versions (`~/.gemini/antigravity*/mcp/`, `~/.figma-mcp-bridge/mcp/`) are removed on `--update`.
 
 ### 2. Guide the User to Activate / Reload the Plugin
 Instruct the user:
 1. Open **Figma Desktop** (must be the Desktop app, not a web browser).
-2. Go to **Plugins** → **Development** → **Import plugin from manifest...** and select `manifest.json` from `~/.gemini/antigravity/mcp/figma-plugin/manifest.json`.
+2. Go to **Plugins** → **Development** → **Import plugin from manifest...** and select `~/.mokido/mcp/figma-plugin/manifest.json`.
 3. Press **`Ctrl + Alt + P`** (macOS: **`Cmd + Option + P`**) to launch/reload **Mokido**.
 4. The plugin status indicator will turn green: **`CONNECTED`** (`ws://127.0.0.1:8765`).
 

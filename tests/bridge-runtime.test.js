@@ -120,10 +120,10 @@ const fontCalls = [];
 async function ensureFont(family, style) { fontCalls.push(family + "/" + style); }
 
 // --- load the runtime ------------------------------------------------------
-const load = new Function("figma", "ensureFont", runtime + "\n;return { createBridgeApi, enrichBridgeError, bridgeWrite, bridgeRead, createTrackingFigma, computeCaptureScale, parseStackFrames, calibrateFromProbeStack, locateErrorInCode, getAnonCalibration, sanitizeForTransfer, EXECUTE_PARAM_NAMES };");
+const load = new Function("figma", "ensureFont", runtime + "\n;return { createBridgeApi, enrichBridgeError, bridgeWrite, bridgeRead, createTrackingFigma, computeCaptureScale, parseStackFrames, calibrateFromProbeStack, locateErrorInCode, getAnonCalibration, sanitizeForTransfer, EXECUTE_PARAM_NAMES, beginCheckpoint };");
 const {
   createBridgeApi, enrichBridgeError, createTrackingFigma, computeCaptureScale,
-  parseStackFrames, calibrateFromProbeStack, locateErrorInCode, getAnonCalibration, sanitizeForTransfer, EXECUTE_PARAM_NAMES
+  parseStackFrames, calibrateFromProbeStack, locateErrorInCode, getAnonCalibration, sanitizeForTransfer, EXECUTE_PARAM_NAMES, beginCheckpoint
 } = load(figma, ensureFont);
 
 let failures = 0;
@@ -456,6 +456,22 @@ let inspectDone = Promise.resolve();
   check("compare: ends with the REF line of exact values to copy (#31)",
     refLn === "REF #" + selRef.id + ": height 44, H, pad 10,14,10,14, gap 8, fill #FFFFFF, stroke #D0D5DD 1 INSIDE all sides, radius 8, shadow DROP 0,1 blur 2 #101828@0.05 - copy from the ref node in figma_execute_code, no props read needed", refLn);
   check("compare: identical -> no REF line", !/REF/.test(api.compare(selRef.id, selRef.id)));
+  // #48: a HUG height follows the content (cards 96 / 120 on two breakpoints): no height diff, no height in REF.
+  const mkCard = (h, fill) => makeNode("FRAME", "Card", {
+    width: 300, height: h, layoutMode: "VERTICAL", itemSpacing: 8, paddingTop: 16, paddingRight: 16, paddingBottom: 16, paddingLeft: 16,
+    layoutSizingHorizontal: "FIXED", layoutSizingVertical: "HUG", fills: [{ type: "SOLID", color: fill }]
+  });
+  const cardRef = mkCard(96, { r: 1, g: 1, b: 1 }), cardMob = mkCard(120, { r: 0, g: 0, b: 0 });
+  figma.currentPage.appendChild(cardRef); figma.currentPage.appendChild(cardMob);
+  const cdiff = api.compare(cardRef.id, [cardMob.id]);
+  check("compare: HUG heights 96/120 are not a diff, REF has no height (#48)",
+    /fill #000000 \(ref #FFFFFF\)/.test(cdiff) && !/height/.test(cdiff), cdiff);
+  const cardFix = mkCard(120, { r: 1, g: 1, b: 1 });
+  cardFix.layoutSizingVertical = "FIXED";
+  figma.currentPage.appendChild(cardFix);
+  const fdiff = api.compare(cardRef.id, [cardFix.id]);
+  check("compare: HUG ref vs FIXED copy -> size diff only, no height (#48)",
+    /size|layout/.test(fdiff) && !/height/.test(fdiff), fdiff);
   check("compare: a node against itself is identical", /: identical$/.test(api.compare(dd.id, dd.id)), api.compare(dd.id, dd.id));
 
   // 4.2.4: session 87bd6b0a — rows whose texts sit in an extra auto-named frame.
@@ -537,6 +553,17 @@ let inspectDone = Promise.resolve();
     const fNested = await inspect({ node_ids: [deep.id], find: "L" });
     const nestedLines = fNested.found.split("\n");
     check("figma_inspect: hits nested in another hit are shown once, inside its tree (#34)", nestedLines.length === 5 && /^FRAME "L0"/.test(nestedLines[0]) && /^ {8}FRAME "L4"/.test(nestedLines[4]), fNested.found);
+    // #49: the find tree is measured in JSON bytes - Cyrillic names cost 2 bytes a char
+    {
+      const srvMod = require(path.join(ROOT, "figma", "index.js"));
+      const cyr = makeNode("FRAME", "Кнопки каталога", { layoutMode: "VERTICAL" });
+      for (let i = 0; i < 30; i++) cyr.appendChild(makeNode("FRAME", "Кнопка оформления заказа " + i, { layoutMode: "HORIZONTAL" }));
+      figma.currentPage.appendChild(cyr);
+      const fc = await inspect({ find: "Кнопки каталога" });
+      const text = srvMod.buildStructuredResult({ result: fc, durationMs: 1234 }, null, { kind: "inspect" });
+      check("figma_inspect: find tree with Cyrillic names fits 3500 B untruncated (#49)",
+        Buffer.byteLength(text) <= 3500 && !JSON.parse(text).truncated && fc.found.indexOf("#" + cyr.id + " ") !== -1, Buffer.byteLength(text) + " " + JSON.stringify(JSON.parse(text).truncated));
+    }
     const fMany = await inspect({ node_ids: [card.id], find: "row 1" });
     check("figma_inspect: find with more than 8 hits -> one line each", fMany.found.split("\n").length === 11 && fMany.found.split("\n").every(l => !/^ /.test(l)), fMany.found);
     // find_text names the layer the text sits in
@@ -938,6 +965,24 @@ console.log("\n== setText ==");
     const capOne = mkMixed("Solo", [{ start: 0, end: 2, fontName: OM }, { start: 2, end: 4, fontName: OL }]);
     await api.setText(capOne, "Другое");
     check("setText: a one-word text keeps the first style (#37)", capOne.rangeFonts.length === 1 && capOne.rangeFonts[0][2] === "Medium", capOne.rangeFonts);
+    // #51: one font, mixed size and colour - a price "1 990 ₽": digits 24px black, the sign 16px grey
+    {
+      const BLACK = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }], GREY = [{ type: "SOLID", color: { r: 0.5, g: 0.5, b: 0.5 } }];
+      const price = makeNode("TEXT", "Price", { characters: "1 990 ₽", fontName: { family: "Inter", style: "Bold" }, fontSize: figma.mixed, fills: figma.mixed });
+      const segs = [{ start: 0, end: 6, fontSize: 24, fills: BLACK }, { start: 6, end: 7, fontSize: 16, fills: GREY }];
+      let asked = null;
+      price.getStyledTextSegments = f => { asked = f; return segs; };
+      price.sizes = []; price.colours = [];
+      price.setRangeFontSize = (a, b, v) => price.sizes.push([a, b, v]);
+      price.setRangeFills = (a, b, v) => price.colours.push([a, b, v[0].color.r]);
+      price.setRangeFontName = () => { throw new Error("fontName is not mixed"); };
+      card.appendChild(price);
+      await api.setText(price, "12 490 ₽");
+      check("setText: mixed size and colour survive by words, one font left alone (#51)",
+        price.characters === "12 490 ₽" && JSON.stringify(asked) === JSON.stringify(["fontSize", "fills"]) &&
+        JSON.stringify(price.sizes) === JSON.stringify([[0, 6, 24], [6, 8, 16]]) && JSON.stringify(price.colours) === JSON.stringify([[0, 6, 0], [6, 8, 0.5]]),
+        { asked, sizes: price.sizes, colours: price.colours });
+    }
     const notText = await rejects(() => api.setText(card, "x"));
     check("setText: a string for a non-TEXT node says how to address layers", /not a TEXT layer/.test(notText) && /layerNameOrId/.test(notText), notText);
     check("setText: the rule is in bridge.info()", /KEEPS font styles by words/.test(JSON.stringify(api.info())), "");
@@ -1248,6 +1293,7 @@ inspectDone = inspectDone.then(async () => {
   const calls = [];
   btn.setReactionsAsync = async function (list) { calls.push(list); this.reactions = list; };
 
+  const ovCp = beginCheckpoint("overlay links");
   const r1 = await api.openOverlay(btn.id, sheet.id, { position: "BOTTOM_CENTER", dim: 0.4 });
   check("openOverlay: reaction is the valid shape (actions[], NODE, OVERLAY, transition present, no overlay keys)",
     calls.length === 1 && btn.reactions.length === 1 && btn.reactions[0].actions.length === 1 &&
@@ -1274,6 +1320,9 @@ inspectDone = inspectDone.then(async () => {
   try { r2 = await api.openOverlay(roBtn.id, roSheet.id, { position: "BOTTOM_CENTER", dim: 0.4 }); } catch (e) { roErr = e; }
   check("openOverlay: read-only overlay look -> link is still set, no throw", !roErr && roBtn.reactions.length === 1 && roBtn.reactions[0].actions[0].navigation === "OVERLAY", roErr && roErr.message);
   check("openOverlay: read-only overlay look -> result names the manual step", typeof r2 === "string" && /MANUAL STEP/.test(r2) && /Prototype panel/.test(r2) && /BOTTOM_CENTER/.test(r2), r2);
+  const ovRes = ovCp.commit();
+  check("openOverlay (#45 #46): the checkpoint lists every [trigger, overlay] with manual = look not set",
+    JSON.stringify(ovRes.overlays) === JSON.stringify([{ trigger: btn.id, overlay: sheet.id, manual: false }, { trigger: roBtn.id, overlay: roSheet.id, manual: true }]), ovRes.overlays);
 
   await api.setReaction(back.id, { to: home.id, nav: "NAVIGATE", transition: "PUSH/RIGHT/0.4" });
   const bt = back.reactions[0].actions[0].transition;
@@ -1312,6 +1361,17 @@ inspectDone = inspectDone.then(async () => {
   check("flow: no node_ids -> the page's screens are scanned, no refusal (#35)",
     typeof flowAll.flow === "string" && /^FLOW: [1-9]\d* links? from /.test(flowAll.flow) && !/pass node_ids/.test(flowAll.flow) && flowAll.flow.indexOf('SCREEN "Home" #' + home.id) !== -1, flowAll.flow);
 
+  // #52: the selection is walked first, then the rest of the page
+  {
+    const srvFlow = require(path.join(ROOT, "figma", "index.js")).buildInspectCode({ view: "flow" });
+    figma.currentPage.selection = [roHost];
+    const flowSel = await new (Object.getPrototypeOf(async function () {}).constructor)("figma", "bridge", srvFlow)(figma, api);
+    figma.currentPage.selection = [];
+    const firstScreen = (flowSel.flow.split("\n").find(l => /SCREEN "/.test(l)) || "");
+    check("flow: no node_ids -> the selected screen comes first, then the page (#52)",
+      firstScreen.indexOf('SCREEN "RO host" #' + roHost.id) !== -1 && flowSel.flow.indexOf('SCREEN "Home" #' + home.id) !== -1, flowSel.flow);
+  }
+
   // #40: a write into a layer inside an instance says the master and the other instances are intact (compared for real)
   {
     const AF = Object.getPrototypeOf(async function () {}).constructor;
@@ -1333,6 +1393,25 @@ inspectDone = inspectDone.then(async () => {
     insts[2].copy.itemSpacing = 40; // a neighbour that really differs from the master
     nres = await noteOf();
     check("after (#40): a neighbour that differs from the master is counted, not hidden", /and 1 other instance untouched \(1 differ from the master: #/.test(nres.notes[0]), nres.notes);
+    // #50: 400 instances -> one getInstancesAsync per master, 30 neighbours compared, the note says so
+    {
+      const many = [];
+      for (let i = 0; i < 400; i++) {
+        const inst = makeNode("INSTANCE", "Кнопка " + i, { mainComponent: master });
+        inst.appendChild(makeNode("FRAME", "Badge", { id: "I" + inst.id + ";" + mLayer.id, layoutMode: "HORIZONTAL", itemSpacing: 4, fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }] }));
+        many.push(inst);
+      }
+      let lists = 0, compares = 0;
+      master.getInstancesAsync = async () => { lists++; return many; };
+      const realCompare = api.compare;
+      api.compare = (...x) => { compares++; return realCompare(...x); };
+      const two = ["I" + many[0].id + ";" + mLayer.id, "I" + many[1].id + ";" + mLayer.id];
+      const r50 = await new AF("figma", "bridge", srvMod.buildInspectCode({ node_ids: two, notes: true, depth: 0 }))(figma, api);
+      api.compare = realCompare;
+      check("after (#50): 400 instances -> one instance list per master, 30 compares per id, the cap is said",
+        lists === 1 && compares === 60 && r50.notes.length === 2 && / and 30 other instances untouched, of 30 checked \(399 other instances in all\)$/.test(r50.notes[0]), { lists, compares, notes: r50.notes });
+      master.getInstancesAsync = async () => insts.map(x => x.inst);
+    }
     check("after (#40): ids of ordinary nodes give no notes", (await new AF("figma", "bridge", srvMod.buildInspectCode({ node_ids: [master.id], notes: true, depth: 0 }))(figma, api)).notes === undefined);
   }
 

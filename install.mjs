@@ -13,25 +13,57 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ==========================================================================
-// Every physical copy of the server/plugin this installer can create, and
-// which MCP config file(s) should point at each one. Earlier versions copied
-// figma/ + figma-plugin/ into ~/.gemini/antigravity-ide/mcp/ but then wrote
-// EVERY config — including antigravity-ide's own — with the path to the
-// antigravity/ copy. The antigravity-ide copy was never referenced by
-// anything: pure disk cost, and a trap if someone edited "the wrong" copy
-// while debugging. Each install location now owns exactly the config(s) that
-// should reference it.
+// ONE physical copy of the server/plugin, ~/.mokido/mcp, and every MCP config
+// points at it. Up to 4.3 the installer also kept private copies under
+// ~/.gemini/antigravity{,-ide}/mcp/ and the shared one under the pre-rename
+// ~/.figma-mcp-bridge/mcp/. Three copies meant three places to go stale and
+// several "Mokido" servers of different versions fighting for :8765, with the
+// plugin asking to update because the master was the old one. Antigravity
+// does not need its own copy: it writes its <tool>.json files into
+// ~/.gemini/<app>/mcp/<server name>/ wherever the server itself lives.
 // ==========================================================================
 const CANONICAL_KEY = "canonical";
 
 /** Maps an install location key -> the directory its server+plugin copy
- * lives in. `canonical` is the shared copy used by every MCP client that
- * doesn't have its own dedicated Gemini/Antigravity subfolder convention. */
+ * lives in. Only the canonical copy is installed now. */
 function installLocations(home) {
+  return {
+    [CANONICAL_KEY]: path.join(home, ".mokido", "mcp"),
+  };
+}
+
+/** Config files earlier versions wrote a `figma` entry into although no
+ * client reads them: agy CLI reads ~/.gemini/config/mcp_config.json, its
+ * antigravity-cli/ folder only gets tool schemas and conversations. */
+function legacyConfigs(home) {
+  return [path.join(home, ".gemini", "antigravity-cli", "mcp_config.json")];
+}
+
+/** Drops our `figma` entry from a config nothing reads; the file goes too
+ * when nothing else is left in it. */
+function removeLegacyConfigEntry(configFile) {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(configFile, "utf-8")); } catch (e) { return false; }
+  if (!data?.mcpServers?.figma) return false;
+  delete data.mcpServers.figma;
+  try {
+    const onlyEmptyServers = Object.keys(data).length === 1 && Object.keys(data.mcpServers).length === 0;
+    if (onlyEmptyServers) fs.rmSync(configFile);
+    else atomicWriteJson(configFile, data);
+    return true;
+  } catch (e) {
+    console.log(`[!] Warning: could not clean ${configFile}: ${e.message}`);
+    return false;
+  }
+}
+
+/** Copies earlier versions installed and nothing references any more. An
+ * --update removes the files install.mjs put there (see removeLegacyCopy). */
+function legacyLocations(home) {
   return {
     antigravity: path.join(home, ".gemini", "antigravity", "mcp"),
     "antigravity-ide": path.join(home, ".gemini", "antigravity-ide", "mcp"),
-    [CANONICAL_KEY]: path.join(home, ".figma-mcp-bridge", "mcp"),
+    "figma-mcp-bridge": path.join(home, ".figma-mcp-bridge", "mcp"),
   };
 }
 
@@ -69,13 +101,10 @@ function getConfigTargets(home, appdata) {
 
   const geminiRoot = path.join(home, ".gemini");
   if (fs.existsSync(path.join(geminiRoot, "antigravity"))) {
-    targets.push({ path: path.join(geminiRoot, "antigravity", "mcp_config.json"), location: "antigravity" });
+    targets.push({ path: path.join(geminiRoot, "antigravity", "mcp_config.json"), location: CANONICAL_KEY });
   }
   if (fs.existsSync(path.join(geminiRoot, "antigravity-ide"))) {
-    targets.push({ path: path.join(geminiRoot, "antigravity-ide", "mcp_config.json"), location: "antigravity-ide" });
-  }
-  if (fs.existsSync(path.join(geminiRoot, "antigravity-cli"))) {
-    targets.push({ path: path.join(geminiRoot, "antigravity-cli", "mcp_config.json"), location: CANONICAL_KEY });
+    targets.push({ path: path.join(geminiRoot, "antigravity-ide", "mcp_config.json"), location: CANONICAL_KEY });
   }
   if (fs.existsSync(path.join(geminiRoot, "config"))) {
     targets.push({ path: path.join(geminiRoot, "config", "mcp_config.json"), location: CANONICAL_KEY });
@@ -130,36 +159,50 @@ function getConfigTargets(home, appdata) {
  * an --update doesn't invalidate a plugin the user already has open) before
  * generating a new one. */
 function getOrCreateBridgeToken(home, existingTargets) {
+  const tokenFile = path.join(home, ".mokido", "bridge_token.txt");
   for (const target of existingTargets) {
     const cfgPath = target.path;
     if (!fs.existsSync(cfgPath)) continue;
     try {
       const data = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
       const token = data?.mcpServers?.figma?.env?.FIGMA_BRIDGE_TOKEN || "";
-      if (token) return token;
+      if (token) {
+        if (!fs.existsSync(tokenFile)) persistBridgeToken(tokenFile, token);
+        return token;
+      }
     } catch {
       continue;
     }
   }
 
-  const tokenFile = path.join(home, ".figma-mcp-bridge", "bridge_token.txt");
-  if (fs.existsSync(tokenFile)) {
+  // The pre-rename ~/.figma-mcp-bridge file still counts, so moving to
+  // ~/.mokido keeps the token an already-open plugin was built with.
+  const legacyTokenFile = path.join(home, ".figma-mcp-bridge", "bridge_token.txt");
+  for (const file of [tokenFile, legacyTokenFile]) {
+    if (!fs.existsSync(file)) continue;
     try {
-      const saved = fs.readFileSync(tokenFile, "utf-8").trim();
-      if (saved) return saved;
+      const saved = fs.readFileSync(file, "utf-8").trim();
+      if (saved) {
+        if (file !== tokenFile) persistBridgeToken(tokenFile, saved);
+        return saved;
+      }
     } catch {
-      // fall through to generating a new one
+      // try the next file, then generate a new one
     }
   }
 
   const token = crypto.randomBytes(24).toString("hex");
+  persistBridgeToken(tokenFile, token);
+  return token;
+}
+
+function persistBridgeToken(tokenFile, token) {
   try {
     fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
     fs.writeFileSync(tokenFile, token, "utf-8");
   } catch (e) {
     console.log(`[!] Warning: could not persist bridge token to ${tokenFile}: ${e.message}`);
   }
-  return token;
 }
 
 function listFilesRelative(root) {
@@ -296,6 +339,61 @@ function writeVersionMarker(mcpDir, commit) {
   }
 }
 
+function samePath(a, b) {
+  const norm = (p) => {
+    const r = path.resolve(p);
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
+
+/** Deletes what install.mjs put into an old install location, and nothing
+ * else: ~/.gemini/<app>/mcp/ also holds other MCP servers, and Antigravity
+ * keeps its own <tool>.json files inside mcp/figma/ (top-level non-.js files
+ * there are left alone). A folder without our version.json or plugin
+ * manifest is not ours and is skipped. A plugin copy Figma still loads is
+ * refreshed instead of deleted, so the open plugin keeps connecting until it
+ * is re-imported from ~/.mokido. Returns true when something was removed. */
+function removeLegacyCopy(mcpDir, { keepPlugin = false, pkgRoot = __dirname, bridgeToken = "" } = {}) {
+  const figmaDir = path.join(mcpDir, "figma");
+  const pluginDir = path.join(mcpDir, "figma-plugin");
+  const marker = path.join(mcpDir, "version.json");
+  let pluginId = null;
+  try { pluginId = JSON.parse(fs.readFileSync(path.join(pluginDir, "manifest.json"), "utf-8")).id; } catch (e) {}
+  if (!fs.existsSync(marker) && pluginId !== PLUGIN_ID) return false;
+
+  const rm = (p) => {
+    try {
+      fs.rmSync(p, { recursive: true, force: true });
+    } catch (e) {
+      console.log(`[!] Warning: could not remove ${p}: ${e.message}`);
+    }
+  };
+  if (fs.existsSync(figmaDir)) {
+    for (const entry of fs.readdirSync(figmaDir, { withFileTypes: true })) {
+      if (entry.isDirectory() || entry.name.endsWith(".js")) rm(path.join(figmaDir, entry.name));
+    }
+    try { if (fs.readdirSync(figmaDir).length === 0) fs.rmdirSync(figmaDir); } catch (e) {}
+  }
+  if (keepPlugin) {
+    copyTreeClean(path.join(pkgRoot, "figma-plugin"), pluginDir);
+    injectBridgeToken(pluginDir, bridgeToken);
+  } else {
+    rm(pluginDir);
+  }
+  rm(marker);
+  try { if (fs.readdirSync(mcpDir).length === 0) fs.rmdirSync(mcpDir); } catch (e) {}
+  return true;
+}
+
+/** Removes `dir` when it holds nothing but the named leftover files. */
+function removeIfOnlyLeftovers(dir, leftovers) {
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch (e) { return; }
+  if (!entries.every((name) => leftovers.includes(name))) return;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+}
+
 function installOrUpdate({ token = "", isUpdate = false, home, appdata } = {}) {
   home = home ?? os.homedir();
   appdata = appdata !== undefined ? appdata : process.env.APPDATA;
@@ -394,6 +492,21 @@ function installOrUpdate({ token = "", isUpdate = false, home, appdata } = {}) {
     }
   }
 
+  // 4. Remove the copies older versions installed, now that no config we
+  // wrote points at them.
+  const registered = findBridgePluginRegistrations(figmaSettingsPath(home, appdata)) || [];
+  for (const [locKey, mcpDir] of Object.entries(legacyLocations(home))) {
+    const pluginDir = path.join(mcpDir, "figma-plugin");
+    const pluginInUse = registered.some((p) => samePath(path.dirname(p), pluginDir));
+    if (removeLegacyCopy(mcpDir, { keepPlugin: pluginInUse, pkgRoot, bridgeToken })) {
+      console.log(`[✓] Old copy removed (${locKey}): ${mcpDir}` + (pluginInUse ? " (plugin kept until Figma re-imports it)" : ""));
+    }
+  }
+  for (const cfg of legacyConfigs(home)) {
+    if (removeLegacyConfigEntry(cfg)) console.log(`[✓] Unused config cleaned: ${cfg}`);
+  }
+  removeIfOnlyLeftovers(path.join(home, ".figma-mcp-bridge"), ["bridge_token.txt", "update-check.json"]);
+
   const canonicalPlugin = path.join(locations[CANONICAL_KEY], "figma-plugin");
   const manifestPath = path.join(canonicalPlugin, "manifest.json");
 
@@ -469,13 +582,12 @@ function checkFigmaPluginRegistration(home, appdata) {
   const registered = findBridgePluginRegistrations(figmaSettingsPath(home, appdata));
   if (registered === null) return { status: "unknown", registered: [], wrong: [], manifest };
   if (registered.length === 0) return { status: "none", registered, wrong: [], manifest };
-  const norm = (p) => {
-    const r = path.resolve(p);
-    return process.platform === "win32" ? r.toLowerCase() : r;
-  };
-  const installedDirs = Object.values(locations).map((dir) => norm(path.join(dir, "figma-plugin")));
-  const wrong = registered.filter((p) => !installedDirs.includes(norm(path.dirname(p))));
-  return { status: wrong.length ? "wrong" : "ok", registered, wrong, manifest };
+  const installedDirs = Object.values(locations).map((dir) => path.join(dir, "figma-plugin"));
+  const legacyDirs = Object.values(legacyLocations(home)).map((dir) => path.join(dir, "figma-plugin"));
+  const isIn = (dirs) => (p) => dirs.some((d) => samePath(path.dirname(p), d));
+  const wrong = registered.filter((p) => !isIn(installedDirs)(p));
+  const legacy = wrong.filter(isIn(legacyDirs));
+  return { status: wrong.length ? "wrong" : "ok", registered, wrong, legacy, manifest };
 }
 
 function reportFigmaPluginRegistration(home, appdata) {
@@ -484,7 +596,11 @@ function reportFigmaPluginRegistration(home, appdata) {
     for (const p of reg.wrong) {
       console.log(`[!] Figma loads the 'Mokido' plugin from ${p}`);
     }
-    console.log("    That copy was not written by install.mjs, so it has no bridge token and cannot connect.");
+    if (reg.legacy.length === reg.wrong.length) {
+      console.log("    That is the old install folder: it still works, but the next updates go to ~/.mokido.");
+    } else {
+      console.log("    That copy was not written by install.mjs, so it has no bridge token and cannot connect.");
+    }
     console.log("    In Figma: Plugins > Development > Import plugin from manifest... >");
     console.log(`      ${reg.manifest}`);
     console.log("    then remove the old entry. Never paste the token into that copy's ui.html.");
@@ -510,6 +626,11 @@ function runDoctor(home, appdata) {
     const targetPlugin = path.join(mcpDir, "figma-plugin");
     console.log(`[*] [${locKey}] Server Path: ${targetFigma} ${fs.existsSync(targetFigma) ? "[EXISTS]" : "[NOT INSTALLED]"}`);
     console.log(`[*] [${locKey}] Plugin Path: ${targetPlugin} ${fs.existsSync(targetPlugin) ? "[EXISTS]" : "[NOT INSTALLED]"}`);
+  }
+  for (const [locKey, mcpDir] of Object.entries(legacyLocations(home))) {
+    if (fs.existsSync(path.join(mcpDir, "figma", "index.js")) || fs.existsSync(path.join(mcpDir, "figma-plugin"))) {
+      console.log(`[!] [${locKey}] Old copy still on disk: ${mcpDir} (run install.mjs --update to remove it)`);
+    }
   }
 
   const configs = getConfigTargets(home, appdata);
@@ -584,6 +705,8 @@ if (isMainModule) {
 export {
   CANONICAL_KEY,
   installLocations,
+  legacyLocations,
+  removeLegacyCopy,
   checkNodeVersion,
   getConfigTargets,
   getOrCreateBridgeToken,

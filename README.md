@@ -121,7 +121,7 @@ this project ever needs, for the installer and the server alike.
 
 Then, in **Figma Desktop**:
 
-1. **Plugins → Development → Import plugin from manifest…** → pick `figma-plugin/manifest.json`
+1. **Plugins → Development → Import plugin from manifest…** → pick `~/.mokido/mcp/figma-plugin/manifest.json` (the installer prints the full path; the repo's own `figma-plugin/` has no bridge token)
 2. Press **`Ctrl + Alt + P`** (macOS: `Cmd + Option + P`) to launch **Mokido**
 3. Status turns green — **`CONNECTED`**
 

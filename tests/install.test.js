@@ -50,6 +50,8 @@ async function main() {
     atomicWriteJson,
     installOrUpdate,
     installLocations,
+    legacyLocations,
+    removeLegacyCopy,
     CANONICAL_KEY,
     figmaSettingsPath,
     checkFigmaPluginRegistration,
@@ -99,6 +101,10 @@ async function main() {
     const secondCfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
 
     check("bridge token unchanged across --update", secondCfg.mcpServers.figma.env.FIGMA_BRIDGE_TOKEN === firstToken);
+    fs.rmSync(path.join(home, ".mokido", "bridge_token.txt"));
+    installOrUpdate({ token: "", isUpdate: true, home, appdata });
+    check("token from a config is saved to ~/.mokido/bridge_token.txt",
+      fs.readFileSync(path.join(home, ".mokido", "bridge_token.txt"), "utf-8").trim() === firstToken);
     check("unrelated mcp server survives --update", !!secondCfg.mcpServers.other_tool);
     check("a .bak backup was written", fs.existsSync(`${cfgPath}.bak`));
 
@@ -225,9 +231,85 @@ async function main() {
     check("repo checkout registered -> wrong, naming it", wrong.status === "wrong" && wrong.wrong[0] === repoManifest, wrong);
     check("...and pointing at the installed manifest", wrong.manifest === path.join(installLocations(home)[CANONICAL_KEY], "figma-plugin", "manifest.json"), wrong.manifest);
 
-    const installedManifest = seedManifest(path.join(installLocations(home).antigravity, "figma-plugin"), "antigravity-figma-bridge");
+    const legacyManifest = seedManifest(path.join(legacyLocations(home)["figma-mcp-bridge"], "figma-plugin"), "antigravity-figma-bridge");
+    writeSettings([legacyManifest]);
+    const legacy = checkFigmaPluginRegistration(home, appdata);
+    check("old ~/.figma-mcp-bridge copy registered -> wrong, marked legacy", legacy.status === "wrong" && legacy.legacy[0] === legacyManifest, legacy);
+
+    const installedManifest = seedManifest(path.join(installLocations(home)[CANONICAL_KEY], "figma-plugin"), "antigravity-figma-bridge");
     writeSettings([installedManifest]);
-    check("any installed copy registered -> ok", checkFigmaPluginRegistration(home, appdata).status === "ok");
+    check("installed ~/.mokido copy registered -> ok", checkFigmaPluginRegistration(home, appdata).status === "ok");
+
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+
+  console.log("\n== one copy: every config points at ~/.mokido, old copies are removed ==");
+  {
+    const home = mkTempDir("figma-mcp-home-");
+    const appdata = path.join(home, "AppData", "Roaming");
+    const old = legacyLocations(home);
+
+    // A 4.3 machine: Antigravity + IDE with their own copies, the shared copy
+    // in ~/.figma-mcp-bridge, its token file, Figma loading the plugin from it.
+    const seedOldCopy = (mcpDir) => {
+      fs.mkdirSync(path.join(mcpDir, "figma", "optimizer"), { recursive: true });
+      fs.writeFileSync(path.join(mcpDir, "figma", "index.js"), "// old");
+      fs.writeFileSync(path.join(mcpDir, "figma", "optimizer", "a.js"), "// old");
+      fs.mkdirSync(path.join(mcpDir, "figma-plugin"), { recursive: true });
+      fs.writeFileSync(path.join(mcpDir, "figma-plugin", "manifest.json"), JSON.stringify({ id: "antigravity-figma-bridge" }));
+      fs.writeFileSync(path.join(mcpDir, "version.json"), "{}");
+    };
+    for (const app of ["antigravity", "antigravity-ide"]) {
+      const cfg = path.join(home, ".gemini", app, "mcp_config.json");
+      fs.mkdirSync(path.dirname(cfg), { recursive: true });
+      fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { other: { command: "x" } } }));
+      seedOldCopy(old[app]);
+      // Antigravity's own tool list and a neighbouring MCP server must survive.
+      fs.writeFileSync(path.join(old[app], "figma", "figma_inspect.json"), "{}");
+      fs.mkdirSync(path.join(old[app], "sequential-thinking"));
+    }
+    seedOldCopy(old["figma-mcp-bridge"]);
+    const cliCfg = path.join(home, ".gemini", "antigravity-cli", "mcp_config.json");
+    fs.mkdirSync(path.dirname(cliCfg), { recursive: true });
+    fs.writeFileSync(cliCfg, JSON.stringify({ mcpServers: { figma: { command: "node" } } }));
+    fs.writeFileSync(path.join(home, ".figma-mcp-bridge", "bridge_token.txt"), "oldtoken123");
+    const settingsPath = figmaSettingsPath(home, appdata);
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      localFileExtensions: [{ id: 1, manifestPath: path.join(old["figma-mcp-bridge"], "figma-plugin", "manifest.json") }]
+    }));
+    // A folder that merely looks similar but is not ours is never touched.
+    const foreign = legacyLocations(path.join(home, "x"))["antigravity"];
+    fs.mkdirSync(path.join(foreign, "figma"), { recursive: true });
+    fs.writeFileSync(path.join(foreign, "figma", "index.js"), "// someone else's");
+    check("folder without our marker is not removed", removeLegacyCopy(foreign) === false && fs.existsSync(path.join(foreign, "figma", "index.js")));
+
+    installOrUpdate({ token: "", isUpdate: true, home, appdata });
+
+    const canonicalIndex = path.join(installLocations(home)[CANONICAL_KEY], "figma", "index.js").split(path.sep).join("/");
+    for (const app of ["antigravity", "antigravity-ide"]) {
+      const cfg = JSON.parse(fs.readFileSync(path.join(home, ".gemini", app, "mcp_config.json"), "utf-8"));
+      check(`${app} config points at ~/.mokido`, cfg.mcpServers.figma.args[0] === canonicalIndex, cfg.mcpServers.figma.args);
+      check(`${app}: other server in config kept`, !!cfg.mcpServers.other);
+      check(`${app}: old server copy removed`, !fs.existsSync(path.join(old[app], "figma", "index.js")) && !fs.existsSync(path.join(old[app], "figma", "optimizer")));
+      check(`${app}: old plugin copy and marker removed`, !fs.existsSync(path.join(old[app], "figma-plugin")) && !fs.existsSync(path.join(old[app], "version.json")));
+      check(`${app}: Antigravity's tool json and other servers kept`, fs.existsSync(path.join(old[app], "figma", "figma_inspect.json")) && fs.existsSync(path.join(old[app], "sequential-thinking")));
+    }
+    check("bridge token carried over from ~/.figma-mcp-bridge",
+      fs.readFileSync(path.join(home, ".mokido", "bridge_token.txt"), "utf-8").trim() === "oldtoken123");
+    const keptPlugin = path.join(old["figma-mcp-bridge"], "figma-plugin");
+    check("plugin Figma still loads is kept and refreshed with the token",
+      fs.existsSync(path.join(keptPlugin, "ui.html")) && fs.readFileSync(path.join(keptPlugin, "ui.html"), "utf-8").includes("oldtoken123"));
+    check("unused antigravity-cli config with only our entry is removed", !fs.existsSync(cliCfg));
+    check("old shared server copy removed", !fs.existsSync(path.join(old["figma-mcp-bridge"], "figma")));
+
+    // After re-importing from ~/.mokido the next --update clears the rest.
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      localFileExtensions: [{ id: 1, manifestPath: path.join(installLocations(home)[CANONICAL_KEY], "figma-plugin", "manifest.json") }]
+    }));
+    fs.writeFileSync(path.join(old["figma-mcp-bridge"], "version.json"), "{}");
+    installOrUpdate({ token: "", isUpdate: true, home, appdata });
+    check("~/.figma-mcp-bridge gone once Figma uses ~/.mokido", !fs.existsSync(path.join(home, ".figma-mcp-bridge")));
 
     fs.rmSync(home, { recursive: true, force: true });
   }
