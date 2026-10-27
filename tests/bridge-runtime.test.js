@@ -536,7 +536,7 @@ let inspectDone = Promise.resolve();
     const found = await inspect({ node_ids: [card.id], find: "row 1", props: ["width"] });
     check("figma_inspect: find + props reads the matches", Object.keys(found.props).length === 11, found);
     const miss = await inspect({ find: "no such layer" });
-    check("figma_inspect: find with no hits says so", miss.found === "no matches" && !miss.outline, miss);
+    check("figma_inspect: find with no hits says so", /^no matches/.test(miss.found) && !miss.outline, miss);
     const onlyCheck = await inspect({ check: { [card.id]: { width: 300 } } });
     check("figma_inspect: check alone reads nothing else", onlyCheck.check.fail.length === 1 && !onlyCheck.outline, onlyCheck);
     const page = await inspect({});
@@ -1489,6 +1489,23 @@ inspectDone = inspectDone.then(async () => {
   const hint = (await inspect({ node_ids: [cards[0].id, cards[0].children[0].id], props: ["text"] })).props;
   check("T-073: text on a FRAME -> hint to use texts, on TEXT -> characters", /texts/.test(hint[cards[0].id].text) && /^Заголовок/.test(hint[cards[0].children[0].id].text), hint);
 
+  // T-074
+  const p1 = figma.currentPage;
+  const p2 = makeNode("PAGE", "Archive"), p3 = makeNode("PAGE", "Empty");
+  let loads = 0;
+  p2.loadAsync = async () => { loads++; }; p3.loadAsync = async () => { loads++; };
+  p2.appendChild(makeNode("FRAME", "Zebra one")); p2.appendChild(makeNode("FRAME", "Zebra two"));
+  p1.id = p1.id || "p1";
+  figma.root.children = [p1, p2, p3];
+  const miss = await inspect({ find: "Zebra" });
+  check("T-074: no match names the current page and counts matches on the others",
+    miss.found === 'no matches on page "Page 1"' && miss.other_pages.indexOf('"Archive": 2, "Empty": 0') === 0 && loads === 2, miss);
+  const scoped = await inspect({ node_ids: [set.id], find: "Zebra" });
+  check("T-074: with node_ids the reply stays plain", scoped.found === "no matches" && !scoped.other_pages, scoped);
+  figma.root.children = [p1];
+  const single = await inspect({ find: "Zebra" });
+  check("T-074: one page -> no other_pages", !single.other_pages && /Page 1/.test(single.found), single);
+  delete figma.root.children;
 });
 
 inspectDone.then(() => {
