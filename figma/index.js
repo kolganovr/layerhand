@@ -138,7 +138,7 @@ const TIMEOUTS = {
   heavy: envNumber("FIGMA_MCP_TIMEOUT_HEAVY_MS", 120000),
   escalate: envNumber("FIGMA_MCP_ESCALATE_MS", 45000)
 };
-const SERVER_VERSION = "4.3.0";
+const SERVER_VERSION = "4.4.0";
 
 // ------------------------------------------------------------------
 // Token economy. In an agent loop the price of a tool call is not its own
