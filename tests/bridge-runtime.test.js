@@ -1436,6 +1436,34 @@ inspectDone = inspectDone.then(async () => {
     Object.keys(info.macros).some(k => /bridge\.closeOverlay/.test(k)) && Object.keys(info.macros).some(k => /bridge\.componentize/.test(k)));
 });
 
+console.log("\n== inspect T-072 props/variant on sets, T-073 texts, T-074 find across pages ==");
+inspectDone = inspectDone.then(async () => {
+  const api = createBridgeApi();
+  const srvMod = require(path.join(ROOT, "figma", "index.js"));
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const inspect = (args) => new AsyncFunction("figma", "bridge", srvMod.buildInspectCode(args))(figma, api);
+  const defs = {
+    "Size": { type: "VARIANT", defaultValue: "M", variantOptions: ["S", "M", "L"] },
+    "Label#1:2": { type: "TEXT", defaultValue: "Go" },
+    "Disabled#1:3": { type: "BOOLEAN", defaultValue: false }
+  };
+  const set = makeNode("COMPONENT_SET", "Button", { componentPropertyDefinitions: defs });
+  const inSet = makeNode("COMPONENT", "Size=M", { variantProperties: { Size: "M" } });
+  Object.defineProperty(inSet, "componentPropertyDefinitions", { get() { throw new Error("Can only get component property definitions of a component set or non-variant component"); } });
+  set.appendChild(inSet);
+  const master = makeNode("COMPONENT", "Badge", { componentPropertyDefinitions: { "Text#4:5": { type: "TEXT", defaultValue: "New" } } });
+  const inst = makeNode("INSTANCE", "Button", { mainComponent: inSet, componentProperties: { "Label#1:2": { type: "TEXT", value: "Buy" } }, variantProperties: { Size: "M" } });
+  [set, master, inst].forEach(n => figma.currentPage.appendChild(n));
+  const r = (await inspect({ node_ids: [set.id, inSet.id, master.id, inst.id], props: ["props", "variant"] })).props;
+  check("T-072: set props -> compact definitions without #id suffix",
+    JSON.stringify(r[set.id].props) === JSON.stringify({ Size: { type: "VARIANT", default: "M", options: ["S", "M", "L"] }, Label: { type: "TEXT", default: "Go" }, Disabled: { type: "BOOLEAN", default: false } }), r[set.id]);
+  check("T-072: set variant -> variant properties with their options", JSON.stringify(r[set.id].variant) === JSON.stringify({ Size: ["S", "M", "L"] }), r[set.id]);
+  check("T-072: variant inside a set: props from the parent set (own getter throws), variant as before", r[inSet.id].props.Size.options.length === 3 && r[inSet.id].variant.Size === "M", r[inSet.id]);
+  check("T-072: standalone master -> its own definitions", JSON.stringify(r[master.id].props) === JSON.stringify({ Text: { type: "TEXT", default: "New" } }) && r[master.id].variant === null, r[master.id]);
+  check("T-072: instance keeps values", JSON.stringify(r[inst.id].props) === JSON.stringify({ Label: "Buy" }) && r[inst.id].variant.Size === "M", r[inst.id]);
+
+});
+
 inspectDone.then(() => {
   console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
   process.exit(failures ? 1 : 0);

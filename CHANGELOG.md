@@ -32,6 +32,7 @@
   no Google Fonts (works offline); no `install.py` / port hardcoded in texts.
 - **Server:** answers `CLIENT_READY` with `CLIENT_ACK { clientId }` and adds `limits` (`escalateMs`,
   `stalledAfterMs`) to `GET /status`, so the plugin shows "long task" / "looks stuck" at the server's thresholds.
+- **`figma_inspect` props/variant on sets and masters.** `props` on a COMPONENT_SET or COMPONENT returns the property definitions (`{type, default, options}`, `#id` dropped) instead of null; a variant inside a set reads its parent set's. `variant` on a set lists each variant property with its values. Instances are unchanged.
 
 ## 4.3.0 -- renamed to Mokido
 

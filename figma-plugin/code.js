@@ -1023,6 +1023,26 @@ function summarizeTables(refs) {
   return blocks.join("\n");
 }
 
+// Property definitions of a COMPONENT_SET / COMPONENT as { name: { type, default, options? } }
+// (the "#id" suffix of the name is dropped). A variant inside a set throws on its own
+// componentPropertyDefinitions, so it reads the parent set's. null when there are none.
+function readPropDefs(n) {
+  let defs = null;
+  try { defs = n.componentPropertyDefinitions; } catch (e) { defs = null; }
+  if (!defs && n.parent && n.parent.type === "COMPONENT_SET") {
+    try { defs = n.parent.componentPropertyDefinitions; } catch (e) { defs = null; }
+  }
+  if (!defs) return null;
+  const out = {};
+  Object.keys(defs).forEach(k => {
+    const d = defs[k] || {};
+    const row = { type: d.type, default: d.defaultValue };
+    if (d.variantOptions) row.options = d.variantOptions.slice();
+    out[k.replace(/#\d+:\d+$/, "")] = row;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
 // Named read-outs for inspect() and check(). Anything else is read straight
 // off the node (width, itemSpacing, layoutSizingHorizontal, ...).
 const READ_PROPS = {
@@ -1042,8 +1062,17 @@ const READ_PROPS = {
   children: n => ("children" in n && n.children ? n.children.length : 0),
   main: n => { try { return n.type === "INSTANCE" && n.mainComponent ? n.mainComponent.name : null; } catch (e) { return null; } },
   mainId: n => { try { return n.type === "INSTANCE" && n.mainComponent ? n.mainComponent.id : null; } catch (e) { return null; } },
-  variant: n => n.variantProperties || null,
+  variant: n => {
+    if (n.type === "COMPONENT_SET") {
+      const defs = readPropDefs(n);
+      const out = {};
+      Object.keys(defs || {}).forEach(k => { if (defs[k].type === "VARIANT") out[k] = defs[k].options || []; });
+      return Object.keys(out).length ? out : null;
+    }
+    return n.variantProperties || null;
+  },
   props: n => {
+    if (n.type === "COMPONENT_SET" || n.type === "COMPONENT") return readPropDefs(n);
     if (!n.componentProperties) return null;
     const out = {};
     Object.keys(n.componentProperties).forEach(k => { out[k.replace(/#\d+:\d+$/, "")] = n.componentProperties[k].value; });
