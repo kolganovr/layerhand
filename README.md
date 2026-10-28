@@ -20,9 +20,9 @@ canvas, then closes the loop by handing the rendered PNG back to the model for v
 
 ---
 
-![Mokido Demo](assets/demo.gif)
+![Claude Code builds a sign-up screen in Figma from a design system through Mokido](assets/demo.gif)
 
-*Agent generates the design, visually audits the rendered output, detects layout defects, and self-corrects in real time — zero human in the loop.*
+*One prompt, two screens: the agent reads your design system, builds them live in the file you have open, checks its own screenshot and fixes the layout. 56 seconds of real time, sped up.*
 
 ---
 
