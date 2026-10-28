@@ -14,8 +14,12 @@ Execute `install.mjs` in the repository root directory (needs only Node.js — n
 # New installation (with optional token):
 node install.mjs --token "<USER_TOKEN_OR_EMPTY>"
 
-# In-place update:
+# In-place update (pull first, otherwise it reinstalls the same code):
+git pull
 node install.mjs --update
+
+# Installed via npm instead of a clone (keep @latest, a bare npx can reuse a cached old version):
+npx mokido@latest --update
 ```
 
 > [!IMPORTANT]

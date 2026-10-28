@@ -32,6 +32,16 @@ function outline(count, levels = [1]) {
 }
 const isNodeLine = (l) => /^ *FRAME "Node \d+" #9:\d+ 320x200 @0,\d+ \[V gap8 pad16\] fill:#FFFFFF r8\.*$/.test(l);
 
+console.log("\n== update check compares npm releases, not commits ==");
+{
+  check("higher patch/minor/major is newer", srv.isNewerVersion("4.4.1", "4.4.0") && srv.isNewerVersion("4.5.0", "4.4.9") && srv.isNewerVersion("5.0.0", "4.9.9"));
+  check("numeric, not string compare (4.10.0 > 4.9.0)", srv.isNewerVersion("4.10.0", "4.9.0"));
+  check("same or older is not newer", !srv.isNewerVersion("4.4.0", "4.4.0") && !srv.isNewerVersion("4.3.9", "4.4.0"));
+  check("unparsable versions are not newer (0.0.0-stage, garbage)", !srv.isNewerVersion("0.0.0-stage", "4.4.0") && !srv.isNewerVersion(undefined, "4.4.0") && !srv.isNewerVersion("latest", "4.4.0"));
+  const note = srv.updateNotice("4.5.0", "4.4.0");
+  check("notice names both versions and both update paths", /v4\.4\.0 -> v4\.5\.0/.test(note) && /npx mokido@latest/.test(note) && /node install\.mjs --update/.test(note), note);
+}
+
 console.log("\n== multi-line strings shrink by whole lines ==");
 {
   const o25 = outline(25);

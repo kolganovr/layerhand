@@ -146,6 +146,31 @@ Without a token these 7 tools aren't registered at all — see [Tool reference](
 
 </details>
 
+### Updating
+
+Updating is the same installer run again. It overwrites the copy in `~/.mokido/mcp`, keeps your bridge
+token and client configs, and removes copies left by older versions.
+
+```bash
+npx mokido@latest --update
+```
+
+Keep `@latest`: a bare `npx mokido` can reuse the version npx cached last time. From a clone:
+
+```bash
+git pull
+node install.mjs --update
+```
+
+Then reopen the plugin in Figma (`Ctrl + Alt + P`) and restart your AI client. A server that was already
+running keeps the old code in memory, and the plugin shows "Update needed" until it restarts.
+
+You don't have to watch for releases: once a day the server checks npm and prints a one-line notice to
+your client's MCP log when a newer version is out (see [the update check](#engineering-notes)). What
+changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
+Agents updating it for you follow the same steps in [AGENTS.md](AGENTS.md).
+
 ---
 
 ## What it gives the agent
@@ -422,15 +447,16 @@ warning, so it degrades rather than silently opening up.
 <details>
 <summary><b>The one network call this server makes on its own: an update check</b></summary>
 
-On startup the server compares the commit it was installed from (recorded by `install.mjs` into a
-`version.json` beside the copied code) against the latest commit on `main` via one GitHub API
-request, and prints a one-line notice to stderr if they differ. It never applies anything itself —
-`node install.mjs --update` is still a manual, deliberate step.
+On startup an installed server (the copy `install.mjs` wrote, marked by a `version.json` beside the
+code) compares its own version with the latest `mokido` release on npm via one registry request,
+and prints a one-line notice to stderr if a newer release is out. It compares releases, not commits,
+so it works the same for `npx` and clone installs and stays quiet about unreleased work on `main`.
+It never applies anything itself — [updating](#updating) is still a manual, deliberate step.
 
 This is the one thing in this project that assumes network access, so it's built to disappear
 cleanly when there isn't any: the check is fired without being awaited (never delays `initialize`
 or the first tool call), a failed/slow/offline request is caught and silently skipped, and results
-are cached for 24h so it doesn't hit GitHub's unauthenticated rate limit or run once per spawned
+are cached for 24h so it doesn't hit the registry on every launch or run once per spawned
 copy of the server. Set `FIGMA_MCP_NO_UPDATE_CHECK=1` to turn it off entirely — worth doing on the
 locked-down machines the previous note is about.
 

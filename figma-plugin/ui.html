@@ -364,7 +364,7 @@
           </div>
           <div class="VerFix" id="ver-fix" hidden>
             <div class="CmdRow">
-              <code class="CmdBox">npx mokido --update</code>
+              <code class="CmdBox">npx mokido@latest --update</code>
               <button class="Button secondary" id="ver-copy" data-icon="copy"><span class="Label" data-t="settings.copy"></span></button>
             </div>
             <span class="Meta" data-t="settings.reopen"></span>
@@ -542,7 +542,7 @@
           traceDone: 'Done: {desc} · {ago}', traceFailed: 'Failed: {desc} · {ago}',
           agoNow: 'just now', agoMin: '{n} min ago', agoH: '{n} h ago',
           versionTitle: "Plugin v{p} and server v{s} don't match",
-          versionBody: 'Run npx mokido --update, then reopen the plugin.',
+          versionBody: 'Run npx mokido@latest --update, then reopen the plugin.',
           action: {
             retry: 'Retry now', copyCommand: 'Copy command', copyError: 'Copy error', copyDetails: 'Copy details',
             dismiss: 'Dismiss', pause: 'Pause', resume: 'Resume', undo: 'Undo · {n} left'
@@ -599,7 +599,7 @@
           traceDone: 'Готово: {desc} · {ago}', traceFailed: 'Ошибка: {desc} · {ago}',
           agoNow: 'только что', agoMin: '{n} мин назад', agoH: '{n} ч назад',
           versionTitle: 'Плагин v{p} и сервер v{s} разных версий',
-          versionBody: 'Выполните npx mokido --update и откройте плагин заново.',
+          versionBody: 'Выполните npx mokido@latest --update и откройте плагин заново.',
           action: {
             retry: 'Повторить', copyCommand: 'Копировать команду', copyError: 'Копировать ошибку', copyDetails: 'Копировать детали',
             dismiss: 'Скрыть', pause: 'Пауза', resume: 'Продолжить', undo: 'Отменить · осталось {n}'
@@ -1139,7 +1139,7 @@
     const ACTIONS = {
       retry: () => { model.attempts = Math.min(model.attempts, 3); connectWebSocket(true); },
       copyDoctor: () => copy('npx mokido --doctor'),
-      copyUpdate: () => copy('npx mokido --update'),
+      copyUpdate: () => copy('npx mokido@latest --update'),
       copyError: () => {
         const r = model.lastResult || {};
         copy(`${r.description || 'Command'}: ${r.error || ''}${r.code ? '\n' + r.code : ''}`);

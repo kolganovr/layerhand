@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **The update notice now reaches npx installs.** The startup check compared the installed git commit with
+  `main`, and an `npx mokido` install has no commit, so it never said anything. It now compares the server
+  version with the latest `mokido` release on npm (once a day, cached in `~/.mokido/update-check.json`), so
+  it works for npx and clone installs alike and no longer fires on docs-only commits. The notice gives both
+  commands: `npx mokido@latest` and `git pull` + `node install.mjs --update`.
+- **`npx mokido@latest --update` everywhere.** The plugin's "Update needed" hint and Copy command said
+  `npx mokido --update`, which can rerun the version npx cached last time.
+- **README: an "Updating" section** under Quickstart; AGENTS.md says to `git pull` before `--update`.
+
 ## 4.4.0 -- new plugin window with Moki, one install folder
 
 - **One install folder, `~/.mokido/mcp`.** Every client config (Antigravity, Antigravity IDE, Claude Code,

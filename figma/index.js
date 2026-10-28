@@ -4176,16 +4176,14 @@ function startUniversalStdioServer() {
 // network call here must never delay startup or print anything scarier
 // than nothing at all.
 //
-// The INSTALLED copy (~/.mokido/mcp/) is a plain file copy,
-// not a git checkout, so it can't ask git what commit it's at. install.mjs
-// captures that at copy time into version.json, sitting next to this
-// figma/ directory. No marker at all — a source-tree run via
-// `node figma/index.js` straight from a git clone, or an install.mjs run
-// where `git rev-parse` itself failed (no .git, no git binary, downloaded
-// as a zip) — means there is nothing to compare against, so skip silently
-// rather than guess.
+// Compares SERVER_VERSION with the latest release on npm, not commits on
+// main: an npx install has no git commit to compare (the package ships no
+// .git), and a docs-only commit on main isn't an update anyone needs. Runs
+// only for an installed copy (~/.mokido/mcp/), recognised by the
+// version.json install.mjs writes beside this figma/ directory; a
+// source-tree run via `node figma/index.js` skips silently.
 // ------------------------------------------------------------------
-const UPDATE_REPO = "kolganovr/mokido";
+const UPDATE_PACKAGE = "mokido";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function readJsonSafe(filePath) {
@@ -4196,47 +4194,61 @@ function readJsonSafe(filePath) {
   }
 }
 
+/** True when `latest` is a strictly higher x.y.z than `current`. Anything
+ * that doesn't parse (a prerelease tag, the 0.0.0-stage placeholder npm
+ * leaves on a first publish) counts as "not newer" rather than a guess. */
+function isNewerVersion(latest, current) {
+  const parse = (v) => /^\d+\.\d+\.\d+$/.test(String(v)) ? String(v).split(".").map(Number) : null;
+  const a = parse(latest), b = parse(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i];
+  }
+  return false;
+}
+
+function updateNotice(latest, current) {
+  return `[Mokido] Update available: v${current} -> v${latest}. Run "npx mokido@latest" ` +
+    `(or "git pull" + "node install.mjs --update" in your clone), then reopen the Figma plugin ` +
+    `and restart your AI client.`;
+}
+
 async function checkForUpdates() {
   try {
     if (process.env.FIGMA_MCP_NO_UPDATE_CHECK) return;
-
-    const versionInfo = readJsonSafe(path.join(__dirname, "..", "version.json"));
-    const localCommit = versionInfo && versionInfo.commit;
-    if (!localCommit) return;
+    if (!readJsonSafe(path.join(__dirname, "..", "version.json"))) return;
 
     const cacheDir = path.join(os.homedir(), ".mokido");
     const cachePath = path.join(cacheDir, "update-check.json");
     const cache = readJsonSafe(cachePath);
 
-    let remoteSha = cache && cache.remoteSha;
-    const fresh = cache && typeof cache.lastCheckedAt === "number" &&
+    // A cache left by the old commit-based check has no latestVersion: stale.
+    let latest = cache && cache.latestVersion;
+    const fresh = latest && typeof cache.lastCheckedAt === "number" &&
       (Date.now() - cache.lastCheckedAt) < UPDATE_CHECK_INTERVAL_MS;
 
     if (!fresh) {
-      const res = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/commits/main`, {
-        headers: { "User-Agent": "mokido", "Accept": "application/vnd.github+json" },
+      const res = await fetch(`https://registry.npmjs.org/${UPDATE_PACKAGE}/latest`, {
+        headers: { "User-Agent": "mokido", "Accept": "application/json" },
         signal: AbortSignal.timeout(4000)
       });
-      // Rate-limited, repo moved, offline resolver returning a captive
+      // Rate-limited, registry down, offline resolver returning a captive
       // portal page, whatever — try again next launch rather than guessing.
       if (!res.ok) return;
       const data = await res.json();
-      if (!data || typeof data.sha !== "string") return;
-      remoteSha = data.sha;
+      if (!data || typeof data.version !== "string") return;
+      latest = data.version;
       try {
         fs.mkdirSync(cacheDir, { recursive: true });
-        fs.writeFileSync(cachePath, JSON.stringify({ lastCheckedAt: Date.now(), remoteSha }), "utf8");
+        fs.writeFileSync(cachePath, JSON.stringify({ lastCheckedAt: Date.now(), latestVersion: latest }), "utf8");
       } catch (e) {
         // Cache write failing just means we ask again next launch instead
         // of waiting out the full interval — not worth surfacing.
       }
     }
 
-    if (remoteSha && remoteSha !== localCommit) {
-      console.error(
-        `[Mokido] Update available on main (installed ${localCommit.slice(0, 7)}, ` +
-        `latest ${remoteSha.slice(0, 7)}). Run "node install.mjs --update" from your cloned repo to update.`
-      );
+    if (isNewerVersion(latest, SERVER_VERSION)) {
+      console.error(updateNotice(latest, SERVER_VERSION));
     }
   } catch (e) {
     // Offline, DNS failure, corporate proxy, a bug in this function itself —
@@ -4258,6 +4270,6 @@ if (require.main === module) {
   module.exports = {
     TOOLS, SERVER_INSTRUCTIONS, ECONOMY, TIMEOUTS, CAPS_NOTE, WHAT_YOU_GET,
     shrinkToBudget, pngSize, collectImages, buildStructuredResult, captureOptions, getActiveTools,
-    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, similarHint, afterWriteOutline, readNudge, classifyScript, suggestInspect, READ_STATE, postWrite, resetReadStreak, readGuard, guardRefusal, pageWideScan, macroGuard, overlayCall, overlayDone, OVERLAY_LINKED, linkOverlay, linkedOverlay, unlinkCheckpoint, resultIds, overlayPairs, withFontMemo, stripFontMemo, FONT_MEMO_PRELUDE, shieldParams, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope
+    buildInspectCode, applyTokenBudget, byteLength, outputBudgetInfo, truncationNote, similarHint, afterWriteOutline, readNudge, classifyScript, suggestInspect, READ_STATE, postWrite, resetReadStreak, readGuard, guardRefusal, pageWideScan, macroGuard, overlayCall, overlayDone, OVERLAY_LINKED, linkOverlay, linkedOverlay, unlinkCheckpoint, resultIds, overlayPairs, withFontMemo, stripFontMemo, FONT_MEMO_PRELUDE, shieldParams, rewriteComponentize, compressValidationError, readJobSnapshot, jobs, MCP_CLIENT, activeOutputCeiling, applyLineOffset, checkAgentSyntax, buildErrorEnvelope, isNewerVersion, updateNotice
   };
 }
