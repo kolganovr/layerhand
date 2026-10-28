@@ -1,4 +1,4 @@
-figma.showUI(__html__, { width: 360, height: 390, themeColors: true });
+figma.showUI(__html__, { width: 360, height: 240, themeColors: true });
 
 let autoZoomEnabled = true;
 let smartPlacementEnabled = true;
@@ -34,16 +34,32 @@ function bytesToBase64(bytes) {
   return result;
 }
 
+// A loaded font stays loaded for the plugin's life: load each family|style once.
+// A repeated load of a loaded font can wait 20-270 s for a canvas frame while
+// Figma is in the background (bench H5, T12), so a load still pending after
+// FONT_LOAD_TIMEOUT_MS is taken as done; a font that really is missing fails
+// at the write with the unloaded-font hint.
+const LOADED_FONTS = new Set();
+const FONT_LOAD_TIMEOUT_MS = 5000;
+async function loadFontOnce(font) {
+  const key = font.family + "|" + font.style;
+  if (LOADED_FONTS.has(key)) return;
+  let timer;
+  const late = new Promise(resolve => { timer = setTimeout(resolve, FONT_LOAD_TIMEOUT_MS); });
+  try { await Promise.race([figma.loadFontAsync(font), late]); } finally { clearTimeout(timer); }
+  LOADED_FONTS.add(key);
+}
+
 // Auto-load fonts safely with fallback chain
 async function ensureFont(family = "Inter", style = "Regular") {
   try {
-    await figma.loadFontAsync({ family, style });
+    await loadFontOnce({ family, style });
   } catch (e) {
     try {
-      await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+      await loadFontOnce({ family: "Inter", style: "Regular" });
     } catch (e2) {
       try {
-        await figma.loadFontAsync({ family: "Roboto", style: "Regular" });
+        await loadFontOnce({ family: "Roboto", style: "Regular" });
       } catch (e3) {}
     }
   }
@@ -225,7 +241,7 @@ function beginCheckpoint(label) {
         if (at !== -1) CHECKPOINTS.splice(at, 1);
         return { checkpoint_id: null, created: [], modified: [] };
       }
-      return { checkpoint_id: cp.id, created: cp.created.slice(), modified: cp.modified.map(m => m.id) };
+      return { checkpoint_id: cp.id, created: cp.created.slice(), modified: cp.modified.map(m => m.id), overlays: (cp.overlays || []).slice() };
     }
   };
 }
@@ -1007,6 +1023,34 @@ function summarizeTables(refs) {
   return blocks.join("\n");
 }
 
+const TEXTS_HINT = 'not a TEXT node: use props:["texts"]';
+
+// Property definitions of a COMPONENT_SET / COMPONENT as { name: { type, default, options? } }
+// (the "#id" suffix of the name is dropped). A variant inside a set throws on its own
+// componentPropertyDefinitions, so it reads the parent set's. null when there are none.
+function readPropDefs(n) {
+  let defs = null;
+  try { defs = n.componentPropertyDefinitions; } catch (e) { defs = null; }
+  if (!defs && n.parent && n.parent.type === "COMPONENT_SET") {
+    try { defs = n.parent.componentPropertyDefinitions; } catch (e) { defs = null; }
+  }
+  if (!defs) return null;
+  const out = {};
+  Object.keys(defs).forEach(k => {
+    const d = defs[k] || {};
+    const row = { type: d.type, default: d.defaultValue };
+    if (d.variantOptions) row.options = d.variantOptions.slice();
+    out[k.replace(/#\d+:\d+$/, "")] = row;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+// Every TEXT descendant (depth-first) as "id characters" lines, no truncation.
+function readTexts(n) {
+  const nodes = n.type === "TEXT" ? [n] : (typeof n.findAll === "function" ? n.findAll(x => x.type === "TEXT") : []);
+  return nodes.map(t => t.id + " " + String(t.characters).replace(/\n/g, "\\n"));
+}
+
 // Named read-outs for inspect() and check(). Anything else is read straight
 // off the node (width, itemSpacing, layoutSizingHorizontal, ...).
 const READ_PROPS = {
@@ -1014,7 +1058,7 @@ const READ_PROPS = {
   fills: n => ("fills" in n ? readPaints(n.fills) : null),
   stroke: n => ("strokes" in n ? readPaints(n.strokes) : null),
   strokes: n => ("strokes" in n ? readPaints(n.strokes) : null),
-  text: n => (n.type === "TEXT" ? n.characters : null),
+  text: n => (n.type === "TEXT" ? n.characters : TEXTS_HINT),
   characters: n => (n.type === "TEXT" ? n.characters : null),
   font: n => readFont(n),
   fontFamily: n => (n.type === "TEXT" && n.fontName !== figma.mixed ? n.fontName.family : null),
@@ -1026,13 +1070,23 @@ const READ_PROPS = {
   children: n => ("children" in n && n.children ? n.children.length : 0),
   main: n => { try { return n.type === "INSTANCE" && n.mainComponent ? n.mainComponent.name : null; } catch (e) { return null; } },
   mainId: n => { try { return n.type === "INSTANCE" && n.mainComponent ? n.mainComponent.id : null; } catch (e) { return null; } },
-  variant: n => n.variantProperties || null,
+  variant: n => {
+    if (n.type === "COMPONENT_SET") {
+      const defs = readPropDefs(n);
+      const out = {};
+      Object.keys(defs || {}).forEach(k => { if (defs[k].type === "VARIANT") out[k] = defs[k].options || []; });
+      return Object.keys(out).length ? out : null;
+    }
+    return n.variantProperties || null;
+  },
   props: n => {
+    if (n.type === "COMPONENT_SET" || n.type === "COMPONENT") return readPropDefs(n);
     if (!n.componentProperties) return null;
     const out = {};
     Object.keys(n.componentProperties).forEach(k => { out[k.replace(/#\d+:\d+$/, "")] = n.componentProperties[k].value; });
     return out;
   },
+  texts: n => readTexts(n),
   absolute: n => (n.absoluteBoundingBox ? ["x", "y", "width", "height"].map(k => readRound(n.absoluteBoundingBox[k])) : null),
   reactions: n => readReactions(n),
   connector: n => (n.type === "CONNECTOR"
@@ -1110,9 +1164,19 @@ function strokeSides(n) {
   return null;
 }
 
+// Height only when it is set by hand: a HUG/FILL height follows the content or
+// the parent and legitimately differs between breakpoints (review 4.2.7 #48:
+// cards 96/120 on Desktop/Mobile -> "height 120 (ref 96)" and a fixed resize).
+function fixedHeight(n) {
+  if (n.type === "TEXT" || typeof n.height !== "number") return undefined;
+  if (n.layoutSizingVertical === "HUG" || n.layoutSizingVertical === "FILL") return undefined;
+  return readRound(n.height);
+}
+
 function shapeOf(n) {
   const s = { type: n.type };
-  if (n.type !== "TEXT" && typeof n.height === "number") s.height = readRound(n.height);
+  const h = fixedHeight(n);
+  if (h !== undefined) s.height = h;
   const layout = readLayout(n);
   if (layout) s.layout = layout;
   const al = readAlign(n);
@@ -1182,7 +1246,8 @@ function matchChildren(refKids, tgtKids) {
 // REF #1:2: height 44, H pad 10,14,10,14, gap 8, fill #FFFFFF, stroke #D0D5DD 1 INSIDE all sides, radius 8, shadow DROP 0,1 blur 2 #101828@0.05
 function refSpecLine(n, path) {
   const p = [];
-  if (n.type !== "TEXT" && typeof n.height === "number") p.push("height " + readRound(n.height));
+  const h = fixedHeight(n);
+  if (h !== undefined) p.push("height " + h);
   if ("layoutMode" in n && n.layoutMode && n.layoutMode !== "NONE") {
     p.push(n.layoutMode === "VERTICAL" ? "V" : n.layoutMode === "HORIZONTAL" ? "H" : n.layoutMode);
     p.push("pad " + [n.paddingTop, n.paddingRight, n.paddingBottom, n.paddingLeft].map(readRound).join(","));
@@ -1254,6 +1319,8 @@ function compareNodes(refRef, targets, opts) {
     const visit = (r, t, path, level) => {
       if (lines.length >= maxLines) return;
       const a = shapeOf(r), b = shapeOf(t);
+      // one side HUG/FILL: the "size" diff already says it, a height diff is noise
+      if (!("height" in a) || !("height" in b)) { delete a.height; delete b.height; }
       const keys = Object.keys(a).concat(Object.keys(b).filter(k => !(k in a)));
       const out = [];
       if (level > 0 && r.name !== t.name && !(AUTO_NAME_RE.test(r.name) && AUTO_NAME_RE.test(t.name))) out.push("name " + JSON.stringify(t.name) + " (ref " + JSON.stringify(r.name) + ")");
@@ -1588,13 +1655,14 @@ async function loadFontsForTextNode(textNode) {
   }
 }
 
-// New text for a TEXT node without losing its font styles. Plain `characters =`
+// New text for a TEXT node without losing its styles. Plain `characters =`
 // gives the whole text the style of one place (T6: "Oswald Medium" first word +
-// "Oswald Light" tail became all one style in 12 of 12 runs). The old text's
-// words carry their style; new word i takes the style of old word i (words
-// beyond the old count take the last one), the whitespace before a word goes
-// with that word: first word -> first style, tail from the first space -> the
-// second style.
+// "Oswald Light" tail became all one style in 12 of 12 runs; review 4.2.7 #51:
+// a price "1 990 ₽" with 24px digits and a 16px grey sign became one size and
+// colour). The old text's words carry their style; new word i takes the style
+// of old word i (words beyond the old count take the last one), the whitespace
+// before a word goes with that word: first word -> first style, tail from the
+// first space -> the second style. Each mixed property goes the same way.
 function textWords(text) {
   const out = [];
   const re = /\S+/g;
@@ -1603,32 +1671,46 @@ function textWords(text) {
   return out;
 }
 
-function fontRangesForNewText(node, value) {
-  if (node.fontName !== figma.mixed || typeof node.getStyledTextSegments !== "function" || typeof node.setRangeFontName !== "function") return null;
-  const segs = node.getStyledTextSegments(["fontName"]);
+// fontName first: a range's size and letter spacing need its font set.
+const TEXT_STYLE_FIELDS = [
+  ["fontName", "setRangeFontName"],
+  ["fontSize", "setRangeFontSize"],
+  ["fills", "setRangeFills"],
+  ["textDecoration", "setRangeTextDecoration"],
+  ["letterSpacing", "setRangeLetterSpacing"]
+];
+
+// -> [{ field, setter, ranges: [{ start, end, value }] }] for every mixed field, or null.
+function styleRangesForNewText(node, value) {
+  if (typeof node.getStyledTextSegments !== "function") return null;
+  const fields = TEXT_STYLE_FIELDS.filter(f => node[f[0]] === figma.mixed && typeof node[f[1]] === "function");
+  if (!fields.length) return null;
+  const segs = node.getStyledTextSegments(fields.map(f => f[0]));
   const oldWords = textWords(String(node.characters || ""));
   const newWords = textWords(value);
   if (!segs.length || !oldWords.length || !newWords.length) return null;
-  const fontAt = i => { const s = segs.find(x => i >= x.start && i < x.end) || segs[segs.length - 1]; return s.fontName; };
-  const wordFonts = oldWords.map(w => fontAt(w.start));
-  const ranges = [];
-  newWords.forEach((w, i) => {
-    const start = i === 0 ? 0 : newWords[i - 1].end;
-    const end = i === newWords.length - 1 ? value.length : w.end;
-    const font = wordFonts[Math.min(i, wordFonts.length - 1)];
-    const last = ranges[ranges.length - 1];
-    if (last && last.font.family === font.family && last.font.style === font.style && last.end === start) last.end = end;
-    else ranges.push({ start: start, end: end, font: font });
+  const segAt = i => segs.find(x => i >= x.start && i < x.end) || segs[segs.length - 1];
+  const wordSegs = oldWords.map(w => segAt(w.start));
+  return fields.map(([field, setter]) => {
+    const ranges = [];
+    newWords.forEach((w, i) => {
+      const start = i === 0 ? 0 : newWords[i - 1].end;
+      const end = i === newWords.length - 1 ? value.length : w.end;
+      const v = wordSegs[Math.min(i, wordSegs.length - 1)][field];
+      const last = ranges[ranges.length - 1];
+      if (last && JSON.stringify(last.value) === JSON.stringify(v) && last.end === start) last.end = end;
+      else ranges.push({ start: start, end: end, value: v });
+    });
+    return { field, setter, ranges: ranges.filter(r => r.value !== undefined) };
   });
-  return ranges;
 }
 
 async function setTextKeepingFonts(node, value) {
   await loadFontsForTextNode(node);
-  const ranges = fontRangesForNewText(node, value);
+  const styles = styleRangesForNewText(node, value);
   trackModification(node);
   node.characters = value;
-  if (ranges) ranges.forEach(r => { if (r.end > r.start) node.setRangeFontName(r.start, r.end, r.font); });
+  if (styles) styles.forEach(s => s.ranges.forEach(r => { if (r.end > r.start) node[s.setter](r.start, r.end, r.value); }));
 }
 
 // ==========================================================================
@@ -2156,6 +2238,7 @@ function createBridgeApi() {
   api.openOverlay = async function (node, overlay, opts) {
     const o = opts || {};
     const target = macroNodes(overlay, "openOverlay")[0];
+    const trig = macroNodes(node, "openOverlay")[0];
     if (!("overlayPositionType" in target)) {
       throw new Error("bridge.openOverlay: " + target.type + " \"" + target.name + "\" cannot be an overlay: use a top-level FRAME");
     }
@@ -2188,6 +2271,9 @@ function createBridgeApi() {
       if (JSON.stringify(target[k]) !== JSON.stringify(want[k])) manual.push(k);
     }
     const look = position + ", dim " + (bg.type === "NONE" ? "none" : readHex(bg.color, bg.color.a)) + ", click outside " + (want.overlayBackgroundInteraction === "NONE" ? "does nothing" : "closes");
+    // The server builds `done` and its overlay registry from this, not from the
+    // script's text or the order of `modified` (review 4.2.7 #45 #46).
+    if (activeCheckpoint) (activeCheckpoint.overlays = activeCheckpoint.overlays || []).push({ trigger: trig.id, overlay: target.id, manual: manual.length > 0 });
     if (!manual.length) return res + " (" + look + ")";
     return res + ". MANUAL STEP for the user: the Plugin API cannot set the overlay look (read-only), so in Figma select frame \"" + target.name +
       "\" > Prototype panel > Overlay and set: " + look + ". Do not search for another way; tell the user.";
@@ -2255,7 +2341,7 @@ function createBridgeApi() {
       },
       macros: {
         "bridge.setProps(instance, { Name: value })": "sets component properties by readable name (\"Label\" matches \"Label#12:3\", case-insensitive); INSTANCE_SWAP takes a component node or id; unknown name -> error listing the real properties and variants; returns the instance",
-        "await bridge.setText(root, { layerNameOrId: \"text\" })": "loads every font of the node, sets characters on TEXT layers found by id or exact name under root; unknown layer -> error listing text layers; returns { set: [ids] }. Use it to replace text instead of `characters =`: it KEEPS font styles by words (first word keeps its style, the tail from the first space keeps its own; with more styles word by word, extra words take the last). Also bridge.setText(textNodeOrId, \"new text\") for one TEXT node",
+        "await bridge.setText(root, { layerNameOrId: \"text\" })": "loads every font of the node, sets characters on TEXT layers found by id or exact name under root; unknown layer -> error listing text layers; returns { set: [ids] }. Use it to replace text instead of `characters =`: it KEEPS font styles by words - font, size, colour, decoration, letter spacing (first word keeps its style, the tail from the first space keeps its own; with more styles word by word, extra words take the last). Also bridge.setText(textNodeOrId, \"new text\") for one TEXT node",
         "await bridge.replaceWithInstance(target, component, { props, text, keepSize: false, remove: true })": "puts an instance of COMPONENT / COMPONENT_SET (default variant) / INSTANCE / id into target's slot (same index, position or AutoLayout sizing), applies props/text, removes target; returns the instance",
         "bridge.shift(nodesOrIds, { dx: 0, dy: 0 })": "moves nodes by an offset; returns the count",
         "bridge.moveInto(nodesOrIds, container, { layout: \"none\" | \"row\" | \"column\", gap: 100, padding: 0 })": "reparents nodes; none keeps their canvas position, row/column lays them out; returns ids",
@@ -3264,7 +3350,7 @@ figma.ui.onmessage = async (msg) => {
       id: msg.id,
       success: false,
       description: msg.description || 'AI Command',
-      error: 'Paused by user. Resume from the Control tab to let the AI act again.',
+      error: 'Paused by the user in the Mokido plugin. Ask them to press Resume there.',
       code: 'EXECUTION_PAUSED',
       startTime: msg.startTime
     });
@@ -3477,6 +3563,7 @@ figma.ui.onmessage = async (msg) => {
         checkpointId: cpResult.checkpoint_id,
         created: cpResult.created,
         modified: cpResult.modified,
+        overlays: cpResult.overlays && cpResult.overlays.length ? cpResult.overlays : undefined,
         warnings: warnings,
         durationMs: Date.now() - execStart,
         startTime: startTime

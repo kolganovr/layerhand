@@ -372,6 +372,38 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   AsyncFn("figma", "ensureFont", efMemo)({ loadFontAsync: async () => {} }, efReal).then(r => {
     check("withFontMemo (#37): 16 ensureFont calls load each font once (+ the default one)", r === 1 && efCalls.length === 3 && efCalls.slice().sort().join() === "Inter|Medium,Oswald|Light,undefined|undefined", efCalls);
   });
+  // #54: loads are remembered across calls (bridge.state), a hung load is let go after the timeout
+  globalThis.__fontMemoDone = (async () => {
+    const st = {};
+    let loads = 0;
+    const fig = { loadFontAsync: async () => { loads++; } };
+    const AF = Object.getPrototypeOf(async function () {}).constructor;
+    const run = c => AF("figma", "ensureFont", "bridge", srv.withFontMemo(c))(fig, async () => {}, { state: st });
+    await run("await figma.loadFontAsync({ family: 'Oswald', style: 'Light' }); return 1;");
+    await run("for (let i = 0; i < 5; i++) await figma.loadFontAsync({ family: 'Oswald', style: 'Light' }); return 1;");
+    check("withFontMemo (#54): a font loaded by an earlier call is not loaded again", loads === 1 && st.__fontsLoaded["Oswald|Light"] === 1, { loads, st });
+    const hung = { loadFontAsync: () => new Promise(() => {}) };
+    const st2 = { __fontTimeoutMs: 50 };
+    const t0 = Date.now();
+    const r = await AF("figma", "ensureFont", "bridge", srv.withFontMemo("await figma.loadFontAsync({ family: 'Inter', style: 'Bold' }); return 'went on';"))(hung, async () => {}, { state: st2 });
+    check("withFontMemo (#54): a load that never resolves is let go after the timeout", r === "went on" && Date.now() - t0 < 1000 && st2.__fontsLoaded["Inter|Bold"] === 1, [r, Date.now() - t0]);
+    const bad = { loadFontAsync: async () => { throw new Error("font not found"); } };
+    const e2 = await AF("figma", "ensureFont", "bridge", srv.withFontMemo("await figma.loadFontAsync({ family: 'Nope', style: 'X' });"))(bad, async () => {}, { state: {} }).then(() => "", e => e.message);
+    check("withFontMemo (#54): a failing load still throws", /font not found/.test(e2), e2);
+  })();
+  // #55: a script declaring a wrapper parameter (log, notify...) runs inside a block, others untouched
+  {
+    const AF = Object.getPrototypeOf(async function () {}).constructor;
+    const PARAMS = ["figma", "ensureFont", "notify", "log", "getFreePosition", "getFreeCanvasPosition", "bridge", "progress"];
+    const sh = srv.shieldParams("const log = [];\nlog.push(1);\nreturn log.length;");
+    let ran = null;
+    try { ran = new AF(...PARAMS, sh); } catch (e) { ran = e.message; }
+    check("shieldParams (#55): `const log` compiles, line count unchanged", typeof ran === "function" && sh.split("\n").length === 4 && /^\{ const log/.test(sh), [ran, sh]);
+    check("shieldParams (#55): other code untouched", srv.shieldParams("const x = 1;\nreturn x;") === "const x = 1;\nreturn x;" && srv.shieldParams("const a = 1; const a = 2;") === "const a = 1; const a = 2;");
+    let threw = null;
+    try { srv.checkAgentSyntax("const log = [];\nreturn 1;"); } catch (e) { threw = e.code; }
+    check("checkAgentSyntax (#55): `const log` is not a syntax error any more", threw === null, threw);
+  }
   const stripped = srv.stripFontMemo({ error: "boom\n  at line 1: " + srv.FONT_MEMO_PRELUDE + "const t = x;" });
   check("stripFontMemo: the prelude never reaches the agent", stripped.error === "boom\n  at line 1: const t = x;", stripped.error);
   check("withFontMemo: prelude parses as a script body", (() => { try { new (Object.getPrototypeOf(async function () {}).constructor)("figma", memo); return true; } catch (e) { return e.message; } })() === true);
@@ -391,17 +423,44 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
   check("overlayDone: names both ids, the wanted look, says MANUAL STEP and not to re-check", /#21:2062 opens overlay #21:2086/.test(od) && /BOTTOM_CENTER/.test(od) && /40%/.test(od) && /clicking outside/.test(od) && /MANUAL STEP/.test(od) && /Don't re-check/.test(od), od);
   // #39: ids kept in variables (h13 T3#3 08732f9d) come from the macro's own result
   const VAR_CODE = `const btnId = '21:2062'; const sheetId = '21:2086'; const r = await bridge.openOverlay(btnId, sheetId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true }); return r;`;
-  check("overlayIds (#39): literals win; variables -> response.modified [trigger, overlay]; no macro -> null",
-    JSON.stringify(srv.overlayIds(`await bridge.openOverlay('1:2', '3:4', {});`, null)) === JSON.stringify(["1:2", "3:4"]) &&
-    JSON.stringify(srv.overlayIds(VAR_CODE, { modified: ["21:2062", "21:2086"] })) === JSON.stringify(["21:2062", "21:2086"]) &&
-    srv.overlayIds(VAR_CODE, { modified: ["21:2062"] }) === null && srv.overlayIds("return 1;", { modified: ["1:1", "2:2"] }) === null);
-  const odv = srv.overlayDone(VAR_CODE, ["21:2062", "21:2086"]);
+  const pairIds = (code, resp) => JSON.stringify(srv.overlayPairs(code, resp).map(x => [x.trigger, x.overlay]));
+  check("overlayPairs (#39): literals; variables -> response.modified [trigger, overlay]; no macro -> []",
+    pairIds(`await bridge.openOverlay('1:2', '3:4', {});`, null) === JSON.stringify([["1:2", "3:4"]]) &&
+    pairIds(VAR_CODE, { modified: ["21:2062", "21:2086"] }) === JSON.stringify([["21:2062", "21:2086"]]) &&
+    pairIds(VAR_CODE, { modified: ["21:2062"] }) === "[]" && pairIds("return 1;", { modified: ["1:1", "2:2"] }) === "[]");
+  // #46: an edit before the macro shifts `modified`; the plugin's own list is the truth, and every call counts
+  const SHIFTED = `const s = await figma.getNodeByIdAsync(sheetId); s.name = 'Sheet'; await bridge.openOverlay(btnId, sheetId, {}); return 'ok';`;
+  check("overlayPairs (#46): the plugin's overlays win over a shifted modified list",
+    pairIds(SHIFTED, { modified: ["21:9", "21:2062", "21:2086"], overlays: [{ trigger: "21:2062", overlay: "21:2086", manual: true }] }) === JSON.stringify([["21:2062", "21:2086"]]) &&
+    srv.overlayPairs(SHIFTED, { overlays: [{ trigger: "21:2062", overlay: "21:2086", manual: true }] })[0].manual === true);
+  const TWO = `await bridge.openOverlay('1:2', '3:4', {}); await bridge.openOverlay('5:6', '7:8', {});`;
+  check("overlayPairs (#46): two literal openOverlay calls -> both pairs; done names both",
+    pairIds(TWO, null) === JSON.stringify([["1:2", "3:4"], ["5:6", "7:8"]]) && /#1:2 opens overlay #3:4, #5:6 opens overlay #7:8/.test(srv.overlayDone(TWO)) && /frame #3:4, #7:8 >/.test(srv.overlayDone(TWO)), srv.overlayDone(TWO));
+  // #45: a look the macro did set is no manual step; the macro's own text tells an older plugin's result apart
+  const odSet = srv.overlayDone(VAR_CODE, [{ trigger: "21:2062", overlay: "21:2086", manual: false }]);
+  check("overlayDone (#45): look set -> done without MANUAL STEP, still 'answer now'", /^Done: #21:2062 opens overlay #21:2086, and the overlay look is set/.test(odSet) && !/MANUAL STEP/.test(odSet) && /answer now/.test(odSet), odSet);
+  const mixed = srv.overlayDone(TWO, [{ trigger: "1:2", overlay: "3:4", manual: false }, { trigger: "5:6", overlay: "7:8", manual: true }]);
+  check("overlayDone (#45): only the overlay left unset is named for the manual step", /MANUAL STEP/.test(mixed) && /frame #7:8 >/.test(mixed) && !/frame #3:4/.test(mixed), mixed);
+  check("overlayPairs (#45): no plugin flag -> manual from the macro's text",
+    srv.overlayPairs(VAR_CODE, { modified: ["21:2062", "21:2086"], result: "#21:2062 ON_CLICK → OVERLAY #21:2086 (BOTTOM_CENTER, dim #000000@0.4, click outside closes)" })[0].manual === false &&
+    srv.overlayPairs(VAR_CODE, { modified: ["21:2062", "21:2086"], result: "#21:2062 ON_CLICK → OVERLAY #21:2086. MANUAL STEP for the user" })[0].manual === true &&
+    srv.overlayPairs(VAR_CODE, { modified: ["21:2062", "21:2086"], result: "ok" })[0].manual === undefined);
+  const odv = srv.overlayDone(VAR_CODE, [{ trigger: "21:2062", overlay: "21:2086" }]);
   check("overlayDone (#39): with ids from the result names both and the wanted look", /#21:2062 opens overlay #21:2086/.test(odv) && /BOTTOM_CENTER/.test(odv) && /40%/.test(odv), odv);
   const scr = srv.buildInspectCode({ node_ids: ["1:2", "3:4"], view: "flow", screens: true });
   check("inspect (#39): screens:true -> the flow is built for the top-level screens of the ids", JSON.parse(/^const a = (.*);$/m.exec(scr)[1]).screens === true && /tops\.push\(n\.id\)/.test(scr), scr.slice(0, 200));
-  srv.OVERLAY_LINKED.set("21:2086", "21:2062");
-  const again = srv.macroGuard(`const t = await figma.getNodeByIdAsync('21:2086'); t.overlayPositionType = 'BOTTOM_CENTER'; return t.overlayPositionType;`);
+  srv.linkOverlay("File A", { trigger: "21:2062", overlay: "21:2086" }, "cp_a");
+  const LOOK_CODE = `const t = await figma.getNodeByIdAsync('21:2086'); t.overlayPositionType = 'BOTTOM_CENTER'; return t.overlayPositionType;`;
+  const again = srv.macroGuard(LOOK_CODE, "File A");
   check("macroGuard: look write on an overlay openOverlay already linked -> OVERLAY_ALREADY_LINKED with done, not run", again && again.body.code === "OVERLAY_ALREADY_LINKED" && again.body.not_run === true && /MANUAL STEP/.test(again.body.done) && /#21:2062/.test(again.body.done), again);
+  // #47: the same id in another file is not that link; a rollback of the write forgets it
+  const otherFile = srv.macroGuard(LOOK_CODE, "File B");
+  check("macroGuard (#47): the same overlay id in another file -> USE_OPEN_OVERLAY, not 'Already done'", otherFile && otherFile.body.code === "USE_OPEN_OVERLAY", otherFile && otherFile.body.code);
+  check("macroGuard (#47): file unknown (proxy, no target) -> any file's link still counts", (srv.macroGuard(LOOK_CODE, null) || { body: {} }).body.code === "OVERLAY_ALREADY_LINKED");
+  srv.unlinkCheckpoint("cp_a");
+  check("unlinkCheckpoint (#47): after figma_rollback of that write the link is forgotten", srv.linkedOverlay("File A", "21:2086") === null && srv.macroGuard(LOOK_CODE, "File A").body.code === "USE_OPEN_OVERLAY");
+  srv.linkOverlay("File A", { trigger: "21:2062", overlay: "21:2086", manual: false }, "cp_b");
+  check("macroGuard (#45 #47): a link whose look was set -> 'Already done', no MANUAL STEP", /set its look/.test(srv.macroGuard(LOOK_CODE, "file a").body.done) && !/MANUAL STEP/.test(srv.macroGuard(LOOK_CODE, "file a").body.done));
   srv.OVERLAY_LINKED.clear();
   check("macroGuard: NAVIGATE reaction and run-anyway pass",
     srv.macroGuard(`b.reactions = [{ trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: "1:3", navigation: "NAVIGATE", transition: null }] }];`) === null &&
@@ -510,6 +569,7 @@ console.log("\n== 4.2.5: read guard, page scans, componentize, validation errors
     check("stalled: first report says STOP (stop:true, stalled:true)", a.stalled === true && a.stop === true && /^STOP/.test(a.hint), a);
     check("stalled: a repeated poll returns at once and says already reported", Date.now() - t0 < 1000 && b.stalled === true && /Already reported/.test(b.hint), [Date.now() - t0, b]);
     srv.jobs.delete("job_stalled");
+    await globalThis.__fontMemoDone;
     console.log(failures === 0 ? "\nALL PASS" : "\n" + failures + " FAILURES");
     process.exit(failures ? 1 : 0);
   })();

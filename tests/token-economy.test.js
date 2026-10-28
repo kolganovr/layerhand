@@ -106,13 +106,15 @@ function fakePng(w, h) {
 }
 
 // A plugin stand-in: connects like ui.html does and answers like code.js does.
-function startFakePlugin() {
+function startFakePlugin(fileName) {
   const received = [];
+  const acks = [];
   let busy = false;
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${TOKEN}`);
   const reply = (msg) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "RESULT", success: true, ...msg }));
   ws.onmessage = async (event) => {
     const cmd = JSON.parse(event.data);
+    if (cmd.type === "CLIENT_ACK") acks.push(cmd.clientId);
     if (!cmd.id) return;
     received.push(cmd);
     const type = cmd.type || "EXECUTE";
@@ -135,6 +137,18 @@ function startFakePlugin() {
           : "FRAME \"Card\" #1:2 320x200";
         return reply({ id: cmd.id, result: { outline }, resultStashed: true, checkpointId: "cp_2" });
       }
+      if (/bridge\.openOverlay\(btnId, sheetId/.test(cmd.code || "")) { // ids in variables, the sheet renamed first
+        const set = /\/\/ look-set/.test(cmd.code);
+        return reply({ id: cmd.id, resultStashed: true, modified: ["21:9", "21:2062", "21:2086"], checkpointId: "cp_ov",
+          result: set ? "#21:2062 ON_CLICK → OVERLAY #21:2086 (BOTTOM_CENTER, dim #000000@0.4, click outside closes)"
+            : "#21:2062 ON_CLICK → OVERLAY #21:2086. MANUAL STEP for the user: ...",
+          overlays: [{ trigger: "21:2062", overlay: "21:2086", manual: !set }] });
+      }
+      const slowWrite = /^\/\/ slow-write:(\d+)\n/.exec(cmd.code || "");
+      if (slowWrite) { // a write that names its node by id and escalates to a job
+        await sleep(Number(slowWrite[1]));
+        return reply({ id: cmd.id, result: { done: true }, resultStashed: true, captureNote: "Nothing was created, modified or captured, so no screenshot." });
+      }
       if (/n\.opacity = 0\.5/.test(cmd.code || "")) { // a write that names its node by id
         return reply({ id: cmd.id, result: { done: true }, resultStashed: true });
       }
@@ -147,6 +161,9 @@ function startFakePlugin() {
       return reply({ id: cmd.id, result: null });
     }
     if (busy) return; // single-threaded sandbox: nothing else gets through
+    if (type === "ROLLBACK") {
+      return reply({ id: cmd.id, result: { checkpoint_id: cmd.checkpoint_id === "last" ? "cp_ov" : cmd.checkpoint_id, label: "x", removed: [], restored: [], missing: [] } });
+    }
     if (type === "SCREENSHOT") {
       return reply({
         id: cmd.id, result: "Captured 5 node(s)",
@@ -157,12 +174,12 @@ function startFakePlugin() {
   };
   const opened = new Promise((resolve, reject) => {
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "CLIENT_READY", fileName: "Economy Test File", pageName: "Page 1", pluginVersion: "4.1.0" }));
+      ws.send(JSON.stringify({ type: "CLIENT_READY", fileName: fileName || "Economy Test File", pageName: "Page 1", pluginVersion: "4.1.0" }));
       resolve();
     };
     ws.onerror = reject;
   });
-  return { ws, received, opened, close: () => ws.close() };
+  return { ws, received, acks, opened, close: () => ws.close() };
 }
 
 let failures = 0;
@@ -201,6 +218,13 @@ async function main() {
   await sleep(100);
 
   try {
+    console.log("\n== plugin UI protocol (CLIENT_ACK, /status limits) ==");
+    check("CLIENT_READY is answered with CLIENT_ACK carrying the client id", plugin.acks.length === 1 && /^ws_/.test(plugin.acks[0]), plugin.acks);
+    const status = await (await fetch(`http://127.0.0.1:${PORT}/status?token=${TOKEN}`)).json();
+    check("GET /status lists the plugin under the acked id", (status.targets || []).some(t => t.id === plugin.acks[0] && t.focused), status.targets);
+    check("GET /status carries the long-task / stalled thresholds",
+      status.limits && status.limits.escalateMs > 0 && status.limits.stalledAfterMs > status.limits.escalateMs, status.limits);
+
     console.log("\n== compact envelope + output budget ==");
     const ok = await master.tool("figma_execute_code", { code: "ok" });
     check("small result comes back whole", ok.body && ok.body.ok === true && ok.body.result.done === true, ok.text);
@@ -289,6 +313,12 @@ async function main() {
     check("...and returns right when it finishes, not at the wait limit", Date.now() - t0 < 4500, Date.now() - t0);
     const again = await master.tool("figma_job_status", { job_id: escalated.body.job_id, wait_ms: 0 });
     check("a finished job is read once", again.isError && again.body.code === "JOB_NOT_FOUND", again.body);
+    // #53: an escalated write gets the same post-processing as a synchronous one
+    const slowW = await master.tool("figma_execute_code", { code: "// slow-write:1200\nconst n = figma.getNodeById('1:2'); n.opacity = 0.5; figma.currentPage.findAll(x => x.name === 'a'); return 'ok';" });
+    const slowDone = slowW.body && slowW.body.job_id ? await master.tool("figma_job_status", { job_id: slowW.body.job_id }) : null;
+    check("#53: a write finished via figma_job_status gets `after`, the page-scan lint, and no 'Nothing was created' note",
+      slowDone && slowDone.body.status === "done" && /no verify call needed[^]*FRAME "Card" #1:2 320x200$/.test(slowDone.body.after) &&
+      /Whole-page scan/.test(slowDone.body.lint || "") && !("capture_note" in slowDone.body), slowDone && slowDone.body);
 
     console.log("\n== PLUGIN_BUSY instead of a bare timeout ==");
     const hang = await master.tool("figma_execute_code", { code: "hang", async: true, description: "Heavy build" });
@@ -333,6 +363,42 @@ async function main() {
     await master.tool("figma_insert_svg", { svg_code: "<svg/>" });
     const svgCmd = plugin.received[plugin.received.length - 1];
     check("insert_svg sends capture:false, keeps 2x for icons, still capped by max_px", svgCmd.capture === false && svgCmd.scale === 2 && svgCmd.max_px === 1024, svgCmd);
+
+    console.log("\n== overlay links come from the plugin, not from the order of modified ==");
+    const OV_CODE = "const btnId = '21:2062'; const sheetId = '21:2086'; const s = await figma.getNodeByIdAsync(sheetId); s.name = 'Sheet'; return await bridge.openOverlay(btnId, sheetId, { position: 'BOTTOM_CENTER', dim: 0.4, closeOnOutside: true });";
+    const ov = await master.tool("figma_execute_code", { code: OV_CODE });
+    check("#46: done names the plugin's [trigger, overlay], not modified[0..1] shifted by the rename",
+      ov.body && /^Done: #21:2062 opens overlay #21:2086\./.test(ov.body.done || "") && !/21:9/.test(ov.body.done || "") && Object.keys(ov.body)[1] === "done", ov.body);
+    const ovSet = await master.tool("figma_execute_code", { code: "// look-set\n" + OV_CODE });
+    check("#45: a look the macro set -> done says it is set, no MANUAL STEP",
+      ovSet.body && /overlay look is set/.test(ovSet.body.done || "") && !/MANUAL STEP/.test(ovSet.body.done || ""), ovSet.body);
+    const LOOK = "const t = await figma.getNodeByIdAsync('21:2086'); t.overlayPositionType = 'BOTTOM_CENTER'; return 1;";
+    const elsewhere = await master.tool("figma_execute_code", { code: LOOK, target: "Other File" });
+    const here = await master.tool("figma_execute_code", { code: LOOK });
+    check("#47: the link counts in its own file only (same id in another file is not 'Already done')",
+      elsewhere.body && elsewhere.body.code === "USE_OPEN_OVERLAY" && here.body && here.body.code === "OVERLAY_ALREADY_LINKED", [elsewhere.body && elsewhere.body.code, here.body && here.body.code]);
+    await master.tool("figma_rollback", {});
+    const rolled = await master.tool("figma_execute_code", { code: LOOK });
+    check("#47: figma_rollback of the write that made the link forgets it", rolled.body && rolled.body.code === "USE_OPEN_OVERLAY", rolled.body && rolled.body.code);
+
+    console.log("\n== figma_job_status re-reads in the job's own file ==");
+    {
+      const other = startFakePlugin("Other File");
+      await other.opened;
+      await sleep(100); // CLIENT_READY made "Other File" the focused one
+      try {
+        plugin.received.length = 0;
+        const job = await master.tool("figma_execute_code", { target: "Economy Test File", code: "// slow-write:1200\nconst n = figma.getNodeById('1:2'); n.opacity = 0.5; return 'ok';" });
+        const fin = job.body && job.body.job_id ? await master.tool("figma_job_status", { job_id: job.body.job_id }) : null;
+        const isAfter = c => c.description === "Inspect (after write)";
+        check("#44: job_status `after` is read in the file the job ran in, not the focused one",
+          fin && fin.body.status === "done" && /FRAME "Card" #1:2/.test(fin.body.after || "") && plugin.received.some(isAfter) && !other.received.some(isAfter),
+          [fin && fin.body, other.received.map(c => c.description)]);
+      } finally {
+        other.close();
+        await sleep(100);
+      }
+    }
 
     console.log("\n== proxy (second agent on the same machine) ==");
     const proxy = startServer();

@@ -121,7 +121,7 @@ this project ever needs, for the installer and the server alike.
 
 Then, in **Figma Desktop**:
 
-1. **Plugins → Development → Import plugin from manifest…** → pick `figma-plugin/manifest.json`
+1. **Plugins → Development → Import plugin from manifest…** → pick `~/.mokido/mcp/figma-plugin/manifest.json` (the installer prints the full path; the repo's own `figma-plugin/` has no bridge token)
 2. Press **`Ctrl + Alt + P`** (macOS: `Cmd + Option + P`) to launch **Mokido**
 3. Status turns green — **`CONNECTED`**
 
@@ -260,6 +260,12 @@ Every default is overridable per call, and per install through env: `FIGMA_MCP_S
 ---
 
 ## What's new
+
+4.4.0: a new plugin window with the Moki companion (12 states, compact square/bar view, settings with versions,
+dark theme, English/Russian); every client now shares one install folder, `~/.mokido/mcp`, and a server exits with
+its session, so a stale one no longer holds port 8765; `figma_inspect` reads property definitions of component
+sets, lists all texts of a frame (`props: ["texts"]`) and names the page when `find` has no match.
+**Re-import the plugin once** from `~/.mokido/mcp/figma-plugin/manifest.json`. History: [CHANGELOG.md](CHANGELOG.md).
 
 4.2.7: `compare` / `like` diffs end with a `REF` line of exact reference values, so the agent fixes copies
 without an extra `props` read; `find` returns the subtree of what it found; `view: "flow"` works without

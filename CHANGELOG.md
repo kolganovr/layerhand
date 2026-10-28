@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.4.0 -- new plugin window with Moki, one install folder
+
+- **One install folder, `~/.mokido/mcp`.** Every client config (Antigravity, Antigravity IDE, Claude Code,
+  Claude Desktop, Cursor, Windsurf) now points at this single copy. Before, Antigravity got its own copies
+  under `~/.gemini/antigravity*/mcp/` and the shared one sat in the pre-rename `~/.figma-mcp-bridge/mcp`:
+  copies of different versions ended up running side by side, and the plugin asked to update because the
+  oldest one held port 8765. `--update` moves the bridge token over and removes the old copies (only the
+  files it installed there; Antigravity's own files and other MCP servers stay).
+- **Re-import the plugin once** from `~/.mokido/mcp/figma-plugin/manifest.json`. Until then the old plugin copy
+  in `~/.figma-mcp-bridge` is kept and refreshed, so it keeps connecting; the next `--update` after the
+  re-import removes `~/.figma-mcp-bridge` altogether.
+- **The server exits with its session.** Besides stdin `close`, it now exits on stdin `end` and when its
+  parent process is gone (checked every 2 s; `FIGMA_MCP_PARENT_CHECK_MS=0` turns that off), so a server left
+  behind by a closed agent no longer holds port 8765 and the plugin socket; a live server takes the port over.
+
+- **New plugin window with Moki.** The old HUD (tabs, log, metrics) is replaced by a 360x240 companion window:
+  Moki on the left, a speech bubble with what is happening right now, at most two buttons, and a trace line
+  ("Done: Rename layers · 5 min ago", click to select the node). 12 states, each with its own text: connecting,
+  ready, working (step N of M and a real progress bar), screenshot, queued, long task, looks stuck, paused,
+  last action failed (Copy error), server not running (retry countdown, `npx mokido --doctor`), token mismatch,
+  agent working in another file. A version mismatch with the server is an "Update needed" pill in the header.
+- **Window:** resizable by the corner (320x220 to 640x600, size remembered); long titles, errors and file names
+  are trimmed instead of growing the window. Compact view: Square (big Moki, resizable) or Bar 280x48, expands by
+  itself when something fails. Pause / Resume and Undo (with how many checkpoints are left) sit next to the task.
+- **Settings** behind the gear: server address (reconnects on change), plugin and server versions, real ping,
+  theme (Auto follows Figma / Light / Dark), language (English / Russian), open as Full or Compact, compact style,
+  auto-zoom, smart placement, collapse while the agent works. Auto-zoom and smart placement now apply on start.
+- **Fixes in the plugin UI:** no more "CONNECTED" before the socket is open; reconnect backs off 1.5 to 10 s
+  instead of every 1.5 s forever; several commands at once are tracked by id (one finishing no longer shows idle);
+  no Google Fonts (works offline); no `install.py` / port hardcoded in texts.
+- **Server:** answers `CLIENT_READY` with `CLIENT_ACK { clientId }` and adds `limits` (`escalateMs`,
+  `stalledAfterMs`) to `GET /status`, so the plugin shows "long task" / "looks stuck" at the server's thresholds.
+- **`figma_inspect` props/variant on sets and masters.** `props` on a COMPONENT_SET or COMPONENT returns the property definitions (`{type, default, options}`, `#id` dropped) instead of null; a variant inside a set reads its parent set's. `variant` on a set lists each variant property with its values. Instances are unchanged.
+- **`figma_inspect` props:["texts"].** All TEXT descendants of a frame as `id characters` lines, full text (no 40-char cut), paged with `offset=K` like the outline. `props:["text"]` on a non-TEXT node now answers with a hint to use "texts" instead of null.
+- **`figma_inspect` find with no match names the page.** Without node_ids, "no matches" now says which page was searched and lists the match count on the other pages (loads at most 8 of them), since a find only covers the current page.
+- **`install.mjs` names a server left running from before the update.** Only one server process owns port 8765; one started before `--update` keeps the old code in memory, so the plugin kept asking to update. The installer now asks the running server for its version and, if it differs, prints the version, the PID and how to restart it (`/mcp` reconnect, close that session, or stop the process). `/status` reports `pid`.
+
 ## 4.3.0 -- renamed to Mokido
 
 - **New name: Mokido.** Two other projects are also called "Figma MCP Bridge", and Figma's brand guidelines ask
