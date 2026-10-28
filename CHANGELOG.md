@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.4.0 -- new plugin window with Moki, one install folder
 
 - **One install folder, `~/.mokido/mcp`.** Every client config (Antigravity, Antigravity IDE, Claude Code,
   Claude Desktop, Cursor, Windsurf) now points at this single copy. Before, Antigravity got its own copies
